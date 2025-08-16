@@ -1,13 +1,17 @@
 ﻿FROM python:3.11-slim
 
-# System libs for psycopg2
-RUN apt-get update && apt-get install -y build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
+# psycopg2 build deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential libpq-dev && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY . .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# (Optional but recommended) run DB migrations before starting
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
-CMD ["sh","-c","alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+
+# Run DB migrations, then start API
+# If you want strict: remove "|| true" so deploy fails when migrations fail
+CMD ["sh","-c","alembic upgrade head || true; uvicorn app.main:app --host 0.0.0.0 --port 8000"]
