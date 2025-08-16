@@ -16,3 +16,4 @@ reportlab
 boto3
 python-multipart
 xlsxwriter
+python-dateutil>=2.9.0.post0

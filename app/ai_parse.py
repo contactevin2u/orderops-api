@@ -4,19 +4,17 @@ import json
 
 from .catalog import CATALOG
 
+# Optional import: date parsing without regex using dateutil
+try:
+    from dateutil import parser as dparser
+except Exception:
+    dparser = None  # handled below
+
 INTENT_MAP = {
-    "RETURN": [
-        "return","pulangkan","dipulangkan","pulang","return rental","balik balikkan"
-    ],
-    "COLLECT": [
-        "collect","pickup","pick up","ambil balik","kutip","ambil"
-    ],
-    "INSTALMENT_CANCEL": [
-        "batal ansuran","batal installment","cancel instalment","cancel installment","instalment cancel","installment cancel"
-    ],
-    "BUYBACK": [
-        "buyback","jual balik","sell back","sellback"
-    ],
+    "RETURN": ["return","pulangkan","dipulangkan","pulang","return rental"],
+    "COLLECT": ["collect","pickup","pick up","ambil balik","kutip","ambil"],
+    "INSTALMENT_CANCEL": ["batal ansuran","batal installment","cancel instalment","cancel installment","instalment cancel","installment cancel"],
+    "BUYBACK": ["buyback","jual balik","sell back","sellback"],
 }
 
 def _lines(text: str) -> List[str]:
@@ -43,7 +41,6 @@ def guess_codes(text: str) -> List[str]:
 
 def fuzzy_intent(text: str, threshold: int = 85) -> Optional[str]:
     t = text.lower()
-    # evaluate phrases using token_set_ratio to be robust
     best: Tuple[Optional[str], int] = (None, -1)
     for label, phrases in INTENT_MAP.items():
         for ph in phrases:
@@ -65,7 +62,6 @@ def fuzzy_items(text: str, topn_per_line: int = 1, threshold: int = 80) -> List[
         for (match_txt, score, idx) in cand:
             if score >= threshold:
                 row = catalog_targets[idx][0]
-                # default qty=1; unit_price vs rent inferred by keywords in line
                 rent = True if any(k in ln.lower() for k in ["sewa","bulan","/bulan","rent","monthly","per month"]) else False
                 picked.append({
                     "sku": row["sku"],
@@ -76,7 +72,7 @@ def fuzzy_items(text: str, topn_per_line: int = 1, threshold: int = 80) -> List[
                     "buyback_rate": row.get("buyback_rate"),
                 })
                 break
-    # Deduplicate by (sku, rent flag)
+    # dedupe
     seen = set(); uniq = []
     for it in picked:
         key = (it["sku"], bool(it["rent_monthly"]))
@@ -85,31 +81,74 @@ def fuzzy_items(text: str, topn_per_line: int = 1, threshold: int = 80) -> List[
     return uniq
 
 def parse_numbers_near_keywords(text: str) -> Dict[str, Optional[float]]:
-    # No regex; naive scan for RM amounts near keywords
-    # Returns outbound_fee/return_fee/total/paid/balance as hints only
     toks = _tokens(text.lower())
     def to_amount(tok: str) -> Optional[float]:
         s = tok.replace("rm","").replace("myr","").replace(",","").strip()
-        try:
-            return float(s)
-        except Exception:
-            return None
-    def find_amount_for(keywords: List[str]) -> Optional[float]:
+        try: return float(s)
+        except: return None
+    def find_amount_for(keys: List[str]) -> Optional[float]:
         for i, tok in enumerate(toks):
-            if tok in keywords:
-                # look right for up to 4 tokens to find a number (rm 280) or (280)
+            if tok in keys:
                 window = toks[i+1:i+5]
-                for j in range(len(window)):
-                    a = to_amount(window[j])
-                    if a is not None:
-                        return a
+                for a in window:
+                    v = to_amount(a)
+                    if v is not None: return v
         return None
-    outbound = find_amount_for(["penghantaran","delivery","pasang","install","installation"])
-    retfee  = find_amount_for(["return","collect","pickup","ambilan","ambil","kutip"])
-    total   = find_amount_for(["total","jumlah"])
-    paid    = find_amount_for(["paid","bayar","dibayar"])
-    bal     = find_amount_for(["balance","baki"])
-    return {"outbound_fee": outbound, "return_fee": retfee, "total": total, "paid": paid, "balance": bal}
+    return {
+        "outbound_fee": find_amount_for(["penghantaran","delivery","pasang","install","installation"]),
+        "return_fee":   find_amount_for(["return","collect","pickup","ambilan","ambil","kutip"]),
+        "total":        find_amount_for(["total","jumlah"]),
+        "paid":         find_amount_for(["paid","bayar","dibayar"]),
+        "balance":      find_amount_for(["balance","baki"]),
+    }
+
+def extract_schedule(text: str) -> Dict[str, Optional[str]]:
+    """Try to get delivery date/time without regex using dateutil.parse (fuzzy, dayfirst)."""
+    if dparser is None:
+        return {"date": None, "time": None}
+    lines = _lines(text)
+    keys = ["deliver","penghantaran","hantar","pasang","install","installation","delivery"]
+    dt = None
+    for ln in lines:
+        if any(k in ln.lower() for k in keys):
+            try:
+                dt = dparser.parse(ln, fuzzy=True, dayfirst=True)
+                break
+            except Exception:
+                continue
+    if dt is None:
+        try:
+            dt = dparser.parse(text, fuzzy=True, dayfirst=True)
+        except Exception:
+            pass
+    if dt is None:
+        return {"date": None, "time": None}
+    time_str = dt.strftime("%H:%M") if (dt.hour or dt.minute) else None
+    return {"date": dt.date().isoformat(), "time": time_str}
+
+def extract_plan(text: str) -> Dict[str, Optional[Any]]:
+    """Get instalment/rental plan months and potential start date."""
+    months = None
+    toks = _tokens(text.lower())
+    month_words = {"month","months","bulan","bln"}
+    for i, tok in enumerate(toks):
+        if tok.isdigit() and i+1 < len(toks) and toks[i+1] in month_words:
+            try:
+                months = int(tok)
+                break
+            except:
+                pass
+    start_date = None
+    if dparser is not None:
+        for ln in _lines(text):
+            if any(k in ln.lower() for k in ["start","mula","bermula","mulai","start date","mula sewa","tarikh mula"]):
+                try:
+                    dt = dparser.parse(ln, fuzzy=True, dayfirst=True)
+                    start_date = dt.date().isoformat()
+                    break
+                except Exception:
+                    continue
+    return {"months": months, "start_date": start_date}
 
 SCHEMA = {
     "name": "order_parse",
@@ -135,21 +174,23 @@ SCHEMA = {
                     "required":["name","qty"]
                 }
             },
-            "delivery":{
-                "type":"object",
-                "properties":{
-                    "outbound_fee":{"type":"number","nullable": True},
-                    "return_fee":{"type":"number","nullable": True}
-                }
-            },
-            "totals":{
-                "type":"object",
-                "properties":{
-                    "total":{"type":"number","nullable": True},
-                    "paid":{"type":"number","nullable": True},
-                    "balance":{"type":"number","nullable": True}
-                }
-            },
+            "delivery":{"type":"object","properties":{
+                "outbound_fee":{"type":"number","nullable": True},
+                "return_fee":{"type":"number","nullable": True}
+            }},
+            "totals":{"type":"object","properties":{
+                "total":{"type":"number","nullable": True},
+                "paid":{"type":"number","nullable": True},
+                "balance":{"type":"number","nullable": True}
+            }},
+            "schedule":{"type":"object","properties":{
+                "date":{"type":"string","nullable": True},     # ISO yyyy-mm-dd
+                "time":{"type":"string","nullable": True}      # HH:MM 24h
+            }},
+            "plan":{"type":"object","properties":{
+                "months":{"type":"integer","nullable": True},
+                "start_date":{"type":"string","nullable": True} # ISO yyyy-mm-dd
+            }},
             "intent":{"type":"string","enum":["RETURN","COLLECT","INSTALMENT_CANCEL","BUYBACK",None]},
             "type_hint":{"type":"string","enum":["RENTAL","OUTRIGHT",None]}
         },
@@ -158,49 +199,47 @@ SCHEMA = {
 }
 
 def ai_parse_text(openai_client, text: str, lang: str = "ms") -> Dict[str, Any]:
-    """
-    RapidFuzz builds hints (intent, codes, items, fees). OpenAI returns structured JSON.
-    We merge: prefer AI fields; fall back to hints for intent/code/items when AI is empty.
-    """
-    hints_items = fuzzy_items(text)
-    hints_intent = fuzzy_intent(text)  # can be None
-    code_candidates = guess_codes(text)
-    fee_hints = parse_numbers_near_keywords(text)
-    type_hint = "RENTAL" if any(w in text.lower() for w in ["sewa","rent","monthly","/bulan","bulan"]) else ("OUTRIGHT" if "beli" in text.lower() or "outright" in text.lower() else None)
+    """RapidFuzz builds hints; OpenAI returns schema JSON; merge with hints; no regex."""
+    hints_items   = fuzzy_items(text)
+    hints_intent  = fuzzy_intent(text)
+    code_cands    = guess_codes(text)
+    fee_hints     = parse_numbers_near_keywords(text)
+    schedule_hint = extract_schedule(text)
+    plan_hint     = extract_plan(text)
+    type_hint     = "RENTAL" if any(w in text.lower() for w in ["sewa","rent","monthly","/bulan","bulan"]) else ("OUTRIGHT" if "beli" in text.lower() or "outright" in text.lower() else None)
 
     hints = {
         "intent": hints_intent,
-        "code_candidates": code_candidates,
+        "code_candidates": code_cands,
         "items": hints_items,
         "fees": fee_hints,
+        "schedule": schedule_hint,
+        "plan": plan_hint,
         "type_hint": type_hint,
     }
 
     result: Dict[str, Any] = {"parsed": {}, "match": None, "intent": hints_intent, "hints": hints}
 
     if openai_client is None:
-        # AI disabled → return hints only; UI can manual-create from this
-        order_code = code_candidates[0] if code_candidates else None
+        order_code = code_cands[0] if code_cands else None
         result["parsed"] = {"hints": hints}
-        result["match"] = {"order_code": order_code, "reason":"fuzzy-hint"} if order_code else None
+        result["match"]  = {"order_code": order_code, "reason":"fuzzy-hint"} if order_code else None
         return result
 
-    # Build AI prompt
     sysmsg = "You are a structured data extractor. Return ONLY JSON that matches the provided schema. If a field is unknown, use null."
     usermsg = (
         "Extract order details from the text.\n\n"
         "Business rules:\n"
-        "- 'Sewa' = RENTAL (monthly), 'Beli' = OUTRIGHT (one-time).\n"
-        "- 'Penghantaran/Pasang/Delivery/Install' is outbound fee; pickup/collect is return fee.\n"
-        "- Items can be from this catalog OR new. If not sure of price, set it null.\n"
-        "- Phone and address are optional; keep raw if unsure.\n"
-        "- intent is one of RETURN, COLLECT, INSTALMENT_CANCEL, BUYBACK, or null.\n"
-        "- Use decimals for money (no currency symbols).\n\n"
+        "- 'Sewa' = RENTAL monthly; 'Beli' = OUTRIGHT.\n"
+        "- Delivery/install are outbound fees; pickup/collect are return fees.\n"
+        "- Items may be from catalog or new. If unsure of price, use null.\n"
+        "- intent ∈ {RETURN, COLLECT, INSTALMENT_CANCEL, BUYBACK} or null.\n"
+        "- schedule.date is yyyy-mm-dd; schedule.time is HH:MM 24h if specified.\n"
+        "- plan.months is total months; plan.start_date is yyyy-mm-dd if specified.\n"
         f"Hints (fuzzy): {json.dumps(hints, ensure_ascii=False)}\n\n"
         f"Text:\n{text}"
     )
 
-    # Try JSON Schema output first; fallback to json_object
     ai_obj: Optional[Dict[str, Any]] = None
     try:
         resp = openai_client.chat.completions.create(
@@ -220,20 +259,14 @@ def ai_parse_text(openai_client, text: str, lang: str = "ms") -> Dict[str, Any]:
         except Exception:
             ai_obj = None
 
-    # Merge AI + hints
-    order_code = (ai_obj or {}).get("order_code") or (code_candidates[0] if code_candidates else None)
-    items = (ai_obj or {}).get("items") or hints_items or []
-    delivery = (ai_obj or {}).get("delivery") or {
-        "outbound_fee": fee_hints.get("outbound_fee"),
-        "return_fee": fee_hints.get("return_fee"),
-    }
-    totals = (ai_obj or {}).get("totals") or {
-        "total": fee_hints.get("total"),
-        "paid": fee_hints.get("paid"),
-        "balance": fee_hints.get("balance"),
-    }
-    intent = (ai_obj or {}).get("intent") or hints_intent
-    type_hint = (ai_obj or {}).get("type_hint") or type_hint
+    order_code = (ai_obj or {}).get("order_code") or (code_cands[0] if code_cands else None)
+    items      = (ai_obj or {}).get("items") or hints_items or []
+    delivery   = (ai_obj or {}).get("delivery") or {"outbound_fee": fee_hints.get("outbound_fee"), "return_fee": fee_hints.get("return_fee")}
+    totals     = (ai_obj or {}).get("totals") or {"total": fee_hints.get("total"), "paid": fee_hints.get("paid"), "balance": fee_hints.get("balance")}
+    intent     = (ai_obj or {}).get("intent") or hints_intent
+    type_hint2 = (ai_obj or {}).get("type_hint") or type_hint
+    schedule   = (ai_obj or {}).get("schedule") or schedule_hint
+    plan       = (ai_obj or {}).get("plan") or plan_hint
 
     parsed = {
         "order_code": order_code,
@@ -243,9 +276,13 @@ def ai_parse_text(openai_client, text: str, lang: str = "ms") -> Dict[str, Any]:
         "items": items,
         "delivery": delivery,
         "totals": totals,
-        "type_hint": type_hint,
+        "schedule": schedule,
+        "plan": plan,
+        "type_hint": type_hint2,
     }
-    result["parsed"] = parsed
-    result["intent"] = intent
-    result["match"] = {"order_code": order_code, "reason":"ai+fuzzy"} if order_code else None
-    return result
+    return {
+        "parsed": parsed,
+        "match": {"order_code": order_code, "reason":"ai+fuzzy"} if order_code else None,
+        "intent": intent,
+        "hints": hints
+    }
