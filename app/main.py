@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 from fastapi import FastAPI, Depends, HTTPException, Body, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
@@ -336,3 +336,4 @@ def export_csv(start: str | None = Query(default=None), end: str | None = Query(
     csv_data = build_export_csv(db, start=start, end=end, include_children=include_children, include_adjustments=include_adjustments, only_unsettled=only_unsettled)
     headers = {"Content-Disposition": f'attachment; filename="orders_{start or "all"}_{end or "all"}.csv"'}
     return Response(content=csv_data, media_type="text/csv", headers=headers)
+
