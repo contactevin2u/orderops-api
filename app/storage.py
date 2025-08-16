@@ -1,25 +1,113 @@
-import os, uuid, io, boto3
-from botocore.client import Config
-from .settings import settings
+﻿from sqlalchemy import create_engine, String, Float, DateTime, Integer, Text, JSON, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase, mapped_column, Mapped, sessionmaker
+from datetime import date, datetime
+import os, math
 
-s3 = None
-if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY and settings.S3_BUCKET:
-    s3 = boto3.client('s3', region_name=settings.AWS_DEFAULT_REGION or "ap-southeast-1",
-                      aws_access_key_id=settings.AWS_ACCESS_KEY_ID, aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-                      config=Config(signature_version='s3v4'))
+DB_URL = os.getenv("DATABASE_URL", "sqlite:///./data.db")
+engine = create_engine(DB_URL, echo=False, future=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
-LOCAL_FILES_DIR = os.path.join(os.path.dirname(__file__), "..", "files")
-os.makedirs(LOCAL_FILES_DIR, exist_ok=True)
+class Base(DeclarativeBase): pass
 
-def store_bytes(file_type: str, data: bytes, filename: str) -> str:
-    if s3:
-        key = f"{file_type}/{uuid.uuid4().hex}/{filename}"
-        s3.upload_fileobj(io.BytesIO(data), settings.S3_BUCKET, key, ExtraArgs={"ContentType": "application/pdf"})
-        return f"https://{settings.S3_BUCKET}.s3.amazonaws.com/{key}"
+# EXISTING
+class Order(Base):
+    __tablename__ = "orders"
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=False))
+
+class Payment(Base):
+    __tablename__ = "payments"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    order_code: Mapped[str] = mapped_column(String(64))
+    amount: Mapped[float] = mapped_column(Float)
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=False))
+
+class Event(Base):
+    __tablename__ = "events"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    order_code: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=False))
+
+class OrderMeta(Base):
+    __tablename__ = "order_meta"
+    order_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    type: Mapped[str] = mapped_column(String(32))          # OUTRIGHT | INSTALMENT | RENTAL
+    status: Mapped[str] = mapped_column(String(16), default="OPEN")
+    customer_name: Mapped[str] = mapped_column(String(128))
+    phone: Mapped[str] = mapped_column(String(64), nullable=True)
+    address: Mapped[str] = mapped_column(Text, nullable=True)
+    plan_months: Mapped[int] = mapped_column(Integer, nullable=True)
+    plan_monthly_amount: Mapped[float] = mapped_column(Float, nullable=True)
+    plan_start_date: Mapped["DateTime"] = mapped_column(DateTime(timezone=False), nullable=True)
+    closed_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=False), nullable=True)
+
+class OrderItem(Base):
+    __tablename__ = "order_items"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    order_code: Mapped[str] = mapped_column(String(64))
+    sku: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(128))
+    qty: Mapped[int] = mapped_column(Integer)
+    unit_price: Mapped[float] = mapped_column(Float, nullable=True)   # OUTRIGHT/INSTALMENT
+    rent_monthly: Mapped[float] = mapped_column(Float, nullable=True) # RENTAL
+    buyback_rate: Mapped[float] = mapped_column(Float, nullable=True) # 0..1
+
+class Charge(Base):
+    __tablename__ = "charges"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    order_code: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(64))  # PRINCIPAL, DELIVERY_OUTBOUND, DELIVERY_RETURN, PENALTY, BUYBACK_CREDIT, ADJUSTMENT
+    amount: Mapped[float] = mapped_column(Float)   # +debit / -credit
+    note: Mapped[str] = mapped_column(String(256), nullable=True)
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=False))
+
+# NEW
+class Delivery(Base):
+    __tablename__ = "deliveries"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    order_code: Mapped[str] = mapped_column(String(64))
+    outbound_date: Mapped["DateTime"] = mapped_column(DateTime(timezone=False), nullable=True)
+    outbound_time: Mapped[str] = mapped_column(String(8), nullable=True)  # "HH:MM"
+    return_date: Mapped["DateTime"] = mapped_column(DateTime(timezone=False), nullable=True)
+    return_time: Mapped[str] = mapped_column(String(8), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="SCHEDULED")  # SCHEDULED|DONE|CANCELLED
+    notes: Mapped[str] = mapped_column(Text, nullable=True)
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    order_code: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(64))
+    meta: Mapped[dict] = mapped_column(JSON, nullable=True)
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=False))
+
+class IdempotencyKey(Base):
+    __tablename__ = "idempotency_keys"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(128))
+    endpoint: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=False))
+    __table_args__ = (UniqueConstraint("key","endpoint", name="uq_idem_key_endpoint"),)
+
+def months_between(start: date, end: date) -> int:
+    return max(0, (end.year - start.year) * 12 + (end.month - start.month))
+
+def days_between(start: date, end: date) -> int:
+    return max(0, (end - start).days)
+
+def rental_monthly_total(items: list[OrderItem]) -> float:
+    return sum((i.rent_monthly or 0) * i.qty for i in items)
+
+def compute_rental_accrual(items: list[OrderItem], start: date, as_of: date) -> float:
+    mode = (os.getenv("RENT_PRORATE","monthly") or "monthly").lower()
+    if mode == "daily":
+        days = days_between(start, as_of)
+        daily_rate = rental_monthly_total(items) / 30.0
+        return round(daily_rate * days, 2)
     else:
-        subdir = os.path.join(LOCAL_FILES_DIR, file_type)
-        os.makedirs(subdir, exist_ok=True)
-        path = os.path.join(subdir, filename)
-        with open(path, "wb") as f:
-            f.write(data)
-        return f"/files/{file_type}/{filename}"
+        months = months_between(start, as_of)
+        return round(rental_monthly_total(items) * months, 2)
+
+def init_db():
+    Base.metadata.create_all(engine)
