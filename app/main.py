@@ -1,7 +1,6 @@
 ﻿from __future__ import annotations
  
-    $imports = $args[0].Groups[1].Value
-    if ($imports -notmatch '\bHeader\b') { "from fastapi import $imports, Header" } else { $args[0].Value }
+    if ($imports -notmatch '\bHeader\b') { "from fastapi import FastAPI, Response, HTTPException, Query, Header
   
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -413,4 +412,5 @@ except Exception as _e:
     import logging
     logging.warning(f"Static /files not mounted: {_e}")
 # ## static-files-mount:end
+
 
