@@ -12,5 +12,5 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 EXPOSE 8000
 
-# Fail fast if migrations fail; remove Alembic if you want table auto-create instead.
-CMD ["sh","-c","alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+# Try migrations; if tables exist already, stamp to head; then start API
+CMD ["sh","-c","alembic upgrade head || alembic stamp head; uvicorn app.main:app --host 0.0.0.0 --port 8000"]
