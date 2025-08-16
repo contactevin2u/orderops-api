@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 from fastapi import FastAPI, Depends, HTTPException, Body, Response, Query
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from starlette.middleware.gzip import GZipMiddleware
@@ -45,7 +46,7 @@ app.include_router(metrics_router)
 
 # Static files for local storage
 files_dir = os.path.join(os.path.dirname(__file__), "..", "files")
-app.mount("/files", StaticFiles(directory=files_dir), name="files")
+# (patched) removed static mount, name="files")
 
 def _to_date(s: str | None):
     if not s:
@@ -397,3 +398,15 @@ def export_xlsx(as_of: Optional[date] = None):
     buf = BytesIO(); wb.save(buf); data = buf.getvalue()
     headers = {"Content-Disposition": f'attachment; filename="orderops-export-{as_of.isoformat()}.xlsx"'}
     return Response(content=data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
+
+# ## static-files-mount:begin (safe)
+try:
+    base_dir = Path(__file__).resolve().parent
+    FILES_DIR = Path(os.getenv("FILES_DIR", str(base_dir.parent / "files")))
+    os.makedirs(FILES_DIR, exist_ok=True)
+    app.mount("/files", StaticFiles(directory=str(FILES_DIR)), name="files")
+except Exception as _e:
+    # Don't crash app if static mount fails; logs are enough
+    import logging
+    logging.warning(f"Static /files not mounted: {_e}")
+# ## static-files-mount:end

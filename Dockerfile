@@ -14,3 +14,7 @@ EXPOSE 8000
 
 # Try migrations; if tables exist already, stamp to head; then start API
 CMD ["sh","-c","alembic upgrade head || alembic stamp head; uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+
+ENV FILES_DIR=/app/files
+RUN mkdir -p /app/files
+
