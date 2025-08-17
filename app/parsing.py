@@ -108,7 +108,18 @@ def parse_message(text: str) -> Dict[str, Any]:
             content = chat.choices[0].message.content  # type: ignore
 
         data = json.loads(content)
+
+        # --- normalize when fallback path doesn''t enforce schema
+        items = data.get("items")
+        if not isinstance(items, list):
+            items = []
+        for it in items:
+            if not it.get("text"):
+                it["text"] = it.get("name") or ""
+        data["items"] = items
+
         return data
     except Exception as e:
         # Return a best-effort minimal object
         return {"event_type": "DELIVERY", "items": [], "notes": f"parse_error: {e}"}
+

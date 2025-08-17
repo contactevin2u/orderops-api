@@ -104,3 +104,4 @@ class PaymentCreate(BaseModel):
 class ManualOrderCreate(BaseModel):
     parsed: ParsedOrder
 
+
