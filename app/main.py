@@ -306,3 +306,77 @@ def parse(body: ParseIn, idem_key: Optional[str] = Header(default=None, alias="I
     return result
 
 from .storage import SessionLocal, OrderMeta, OrderItem, Charge, Payment, Event, Delivery, compute_rental_accrual
+try:
+    from .storage import SessionLocal, OrderMeta, OrderItem, Charge, Payment, Event, Delivery, compute_rental_accrual
+except Exception:
+    pass
+@app.get("/calendar")
+def calendar(from_date: date | None = None, to_date: date | None = None):
+    with SessionLocal() as s:
+        rows = s.query(Delivery).all()
+        out = []
+        for d in rows:
+            if d.outbound_date:
+                dt = d.outbound_date.date()
+                if from_date and dt < from_date:
+                    pass
+                elif to_date and dt > to_date:
+                    pass
+                else:
+                    out.append({
+                        "order_code": d.order_code,
+                        "date": dt.isoformat(),
+                        "time": d.outbound_time,
+                        "kind": "OUTBOUND",
+                        "status": d.status
+                    })
+            if d.return_date:
+                dt2 = d.return_date.date()
+                if from_date and dt2 < from_date:
+                    pass
+                elif to_date and dt2 > to_date:
+                    pass
+                else:
+                    out.append({
+                        "order_code": d.order_code,
+                        "date": dt2.isoformat(),
+                        "time": d.return_time,
+                        "kind": "RETURN",
+                        "status": d.status
+                    })
+        return {"events": out}
+@app.get("/reports/aging")
+def report_aging(as_of: date | None = None):
+    as_of = as_of or datetime.utcnow().date()
+    buckets = {"0-30":0.0,"31-60":0.0,"61-90":0.0,"90+":0.0}
+    rows = []
+    with SessionLocal() as s:
+        metas = s.query(OrderMeta).all()
+        for m in metas:
+            items = s.query(OrderItem).filter_by(order_code=m.order_code).all()
+            charges = s.query(Charge).filter_by(order_code=m.order_code).all()
+            pays = s.query(Payment).filter_by(order_code=m.order_code).all()
+
+            principal = sum(c.amount for c in charges if c.kind == "PRINCIPAL")
+            delivery  = sum(c.amount for c in charges if c.kind in ("DELIVERY_OUTBOUND","DELIVERY_RETURN"))
+            penalty   = sum(c.amount for c in charges if c.kind == "PENALTY")
+            credits   = sum(c.amount for c in charges if c.kind in ("BUYBACK_CREDIT","ADJUSTMENT"))
+            accrual   = 0.0
+            if m.type == "RENTAL" and m.plan_start_date:
+                start_d = m.plan_start_date.date() if hasattr(m.plan_start_date, "date") else m.plan_start_date
+                accrual = compute_rental_accrual(items, start_d, as_of)
+            paid      = sum(p.amount for p in pays)
+            total_due = principal + delivery + penalty + accrual + credits
+            outstanding = round(max(0.0, total_due - paid), 2)
+
+            if outstanding <= 0:
+                continue
+            start_for_age = m.plan_start_date.date() if (m.plan_start_date and hasattr(m.plan_start_date,"date")) else (m.plan_start_date or as_of)
+            age_days = (as_of - start_for_age).days if start_for_age else 0
+            if   age_days <= 30: bucket = "0-30"
+            elif age_days <= 60: bucket = "31-60"
+            elif age_days <= 90: bucket = "61-90"
+            else:                bucket = "90+"
+            buckets[bucket] += outstanding
+            rows.append({"code": m.order_code, "customer": m.customer_name, "type": m.type, "age_days": age_days, "outstanding": outstanding})
+    return {"as_of": as_of.isoformat(), "buckets": buckets, "rows": rows}
