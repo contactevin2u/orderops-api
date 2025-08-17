@@ -1,55 +1,50 @@
-﻿from logging.config import fileConfig
-from sqlalchemy import engine_from_config, pool
-import os`r`nfrom alembic import context
-import os, sys
+import os
+from logging.config import fileConfig
 
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
+from alembic import context
+from sqlalchemy import engine_from_config, pool
+
+# Alembic Config
 config = context.config
-# prefer env DATABASE_URL if present
-try:
-    section = config.get_section(config.config_ini_section)
-    if section is not None:
-        section['sqlalchemy.url'] = os.getenv('DATABASE_URL', section.get('sqlalchemy.url'))
-except Exception:
-    pass
-# Interpret the config file for Python logging.
+
+# logging config (optional)
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
-from app.db import Base, DATABASE_URL
-from app import models
+# prefer DATABASE_URL from env
+section = config.get_section(config.config_ini_section) or {}
+env_url = os.getenv("DATABASE_URL")
+if env_url:
+    section["sqlalchemy.url"] = env_url
 
-target_metadata = Base.metadata
+# explicit migrations only (no autogenerate metadata wired here)
+target_metadata = None
 
-def run_migrations_offline():
-    url = DATABASE_URL
+def run_migrations_offline() -> None:
+    url = section.get("sqlalchemy.url") or config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
-        dialect_opts={"paramstyle": "named"},
+        compare_type=True,
+        compare_server_default=True,
     )
-
     with context.begin_transaction():
         context.run_migrations()
 
-def run_migrations_online():
+def run_migrations_online() -> None:
     connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        section or config.get_section(config.config_ini_section),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
-        url=DATABASE_URL
     )
-
     with connectable.connect() as connection:
         context.configure(
             connection=connection,
-            target_metadata=target_metadata
+            target_metadata=target_metadata,
+            compare_type=True,
+            compare_server_default=True,
         )
-
         with context.begin_transaction():
             context.run_migrations()
 
@@ -57,7 +52,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-
-
-
-
