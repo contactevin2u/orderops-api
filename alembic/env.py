@@ -9,21 +9,28 @@ if config.config_file_name:
 
 target_metadata = None  # using imperative migrations
 
-def get_url():
-    url = os.getenv("DATABASE_URL")
-    if url and url.strip():
-        return url.strip()
+def _normalize_url(url: str) -> str:
+    u = url.strip()
+    if u.startswith("postgres://"):
+        u = "postgresql+psycopg2://" + u[len("postgres://"):]
+    return u
+
+def get_url() -> str:
+    env_url = os.getenv("DATABASE_URL")
+    if env_url and env_url.strip():
+        return _normalize_url(env_url)
     ini_url = config.get_main_option("sqlalchemy.url")
     if ini_url and ini_url.strip():
-        return ini_url.strip()
+        return _normalize_url(ini_url)
     raise SystemExit(
-        "DATABASE_URL is not set. On Render (Docker) it comes from env; "
+        "DATABASE_URL is not set. On Render it comes from the service env; "
         "for local dev set it or put sqlalchemy.url in alembic.ini."
     )
 
-def run_migrations_offline():
+def run_migrations_offline() -> None:
+    url = get_url()
     context.configure(
-        url=get_url(),
+        url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -31,9 +38,10 @@ def run_migrations_offline():
     with context.begin_transaction():
         context.run_migrations()
 
-def run_migrations_online():
+def run_migrations_online() -> None:
+    # IMPORTANT: when prefix='' the key must be 'url'
     connectable = engine_from_config(
-        {"sqlalchemy.url": get_url()},
+        {"url": get_url()},
         prefix="",
         poolclass=pool.NullPool,
     )
