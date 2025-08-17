@@ -13,7 +13,7 @@ from app.models import (
     Delivery, AuditLog, IdempotencyKey
 )
 
-# Optional OpenAI client (kept tolerant)
+# Optional OpenAI client (tolerant)
 openai_client = None
 try:
     from openai import OpenAI
@@ -50,7 +50,7 @@ _files_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "file
 os.makedirs(_files_dir, exist_ok=True)
 app.mount("/files", StaticFiles(directory=_files_dir), name="files")
 
-# Catalog (example)
+# Catalog (sample)
 CATALOG = [
     {"sku":"BED-2F","name":"Hospital Bed 2F","sale_price":2800.0,"rent_monthly":380.0,"buyback_rate":0.40},
     {"sku":"BED-3F","name":"Hospital Bed 3F","sale_price":3800.0,"rent_monthly":480.0,"buyback_rate":0.45},
@@ -108,19 +108,12 @@ class ParseIn(BaseModel):
     lang: Literal["en","ms"] = "en"
 
 # ---- Helpers
-def _val(x): 
-    try: 
-        return x.value
-    except Exception:
-        return x
-
 def months_between(start: date, end: date) -> int:
     return max(0, (end.year - start.year) * 12 + (end.month - start.month))
 
 def compute_accrual(order: Order, as_of: date) -> float:
-    # rental-only accrual
     try:
-        if (_val(order.type) != "RENTAL"): 
+        if order.type != "RENTAL":
             return 0.0
         plan = order.plan
         if not plan or not plan.start_date or not plan.monthly_amount:
@@ -138,7 +131,7 @@ def compute_outstanding(order: Order, as_of: date) -> Dict[str, Any]:
     outstanding = max(0.0, round(total_due - paid, 2))
     return {"accrual": accrual, "ledger": ledger_sum, "paid": paid, "total_due": total_due, "outstanding": outstanding}
 
-# ---- metrics (include if file exists; no crash if missing)
+# ---- Optional metrics router (won't crash if missing)
 try:
     from app.metrics import router as metrics_router
     app.include_router(metrics_router)
@@ -159,14 +152,14 @@ def create_order(body: OrderCreate, idem_key: Optional[str] = Header(default=Non
     with SessionLocal() as s:
         if idem_key:
             exists = s.query(IdempotencyKey).filter_by(key=idem_key, path="/orders").first()
-            if exists: 
+            if exists:
                 raise HTTPException(409, detail="Duplicate request")
             s.add(IdempotencyKey(key=idem_key, method="POST", path="/orders", status_code=202, created_at=now))
 
         if s.query(Order).filter_by(order_code=body.code).first():
             raise HTTPException(409, detail="Order code already exists")
 
-        # customer upsert-ish by phone
+        # customer upsert by phone
         cust = None
         if body.customer.phone:
             cust = s.query(Customer).filter_by(phone=body.customer.phone).first()
@@ -185,7 +178,6 @@ def create_order(body: OrderCreate, idem_key: Optional[str] = Header(default=Non
             if principal > 0:
                 s.add(LedgerEntry(order_id=order.id, kind="INITIAL_CHARGE", amount=principal, note="Items principal"))
 
-        # plan for rental or if provided
         if body.type == "RENTAL" or (body.plan_monthly_amount or body.plan_months or body.plan_start_date):
             s.add(PaymentPlan(
                 order_id=order.id, cadence="MONTHLY",
@@ -194,13 +186,11 @@ def create_order(body: OrderCreate, idem_key: Optional[str] = Header(default=Non
                 start_date=body.plan_start_date or now.date()
             ))
 
-        # delivery fees (prepaid)
         if body.delivery and body.delivery.prepaid_outbound and body.delivery.outbound_fee:
             s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.delivery.outbound_fee, note="Prepaid outbound delivery"))
         if body.delivery and body.delivery.prepaid_return and body.delivery.return_fee:
             s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.delivery.return_fee, note="Prepaid return delivery"))
 
-        # schedule
         if body.schedule and (body.schedule.date or body.schedule.time):
             s.add(Delivery(order_id=order.id, outbound_date=body.schedule.date or now.date(), outbound_time=body.schedule.time, status="SCHEDULED"))
 
@@ -273,7 +263,6 @@ def post_event(code: str, body: EventIn):
             raise HTTPException(404, detail="Order not found")
         if any((e.type in ("RETURN","COLLECT","INSTALMENT_CANCEL","BUYBACK")) for e in (order.events or [])):
             raise HTTPException(400, detail="Terminal event already recorded for this order")
-
         if body.event == "INSTALMENT_CANCEL":
             if body.penalty and body.penalty > 0:
                 s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.penalty, note="Instalment cancel penalty"))
@@ -293,7 +282,6 @@ def post_event(code: str, body: EventIn):
             if body.event=="RETURN" and body.delivery_return_fee and body.delivery_return_fee>0:
                 s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.delivery_return_fee, note="Return delivery"))
             order.status = "RETURNED"
-
         s.add(Event(order_id=order.id, type=body.event, created_at=now))
         s.add(AuditLog(order_id=order.id, action=("EVENT_"+body.event), meta=json.dumps({"source":"api"})))
         s.commit()
@@ -301,7 +289,6 @@ def post_event(code: str, body: EventIn):
 
 @app.post("/parse")
 def parse(body: ParseIn, idem_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
-    # Keep parser tolerant; only use OpenAI if explicitly requested and available
     try:
         from app.parser_spacy import parse_whatsapp
         res = parse_whatsapp(body.text, openai_client=openai_client if (body.matcher=="ai" and openai_client) else None)

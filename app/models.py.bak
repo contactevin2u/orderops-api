@@ -1,76 +1,49 @@
 from datetime import datetime, date
 from decimal import Decimal
-from enum import Enum
-from sqlalchemy import Column, Integer, String, Text, Date, DateTime, Numeric, ForeignKey, LargeBinary
+from sqlalchemy import Column, Integer, String, Text, Date, DateTime, Numeric, ForeignKey
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.postgresql import ENUM
-from .db import Base
+from app.db import Base
 
-class OrderType(Enum):
-    RENTAL = "RENTAL"
-    INSTALMENT = "INSTALMENT"
-    OUTRIGHT = "OUTRIGHT"
-
-class OrderStatus(Enum):
-    DRAFT = "DRAFT"
-    CONFIRMED = "CONFIRMED"
-    RETURNED = "RETURNED"
-    CANCELLED = "CANCELLED"
-
-class EventType(Enum):
-    NONE = "NONE"
-    RETURN = "RETURN"
-    COLLECT = "COLLECT"
-    INSTALMENT_CANCEL = "INSTALMENT_CANCEL"
-    BUYBACK = "BUYBACK"
-
-class LedgerKind(Enum):
-    INITIAL_CHARGE = "INITIAL_CHARGE"
-    MONTHLY_CHARGE = "MONTHLY_CHARGE"
-    ADJUSTMENT = "ADJUSTMENT"
+# Helper to stay tolerant if DB columns are plain strings instead of SQL ENUMs
+def _val(x): 
+    try: 
+        return x.value
+    except Exception:
+        return x
 
 class Customer(Base):
     __tablename__ = "customers"
     id = Column(Integer, primary_key=True)
-    name = Column(String(200), nullable=False)
-    phone = Column(String(50))
-    phone_norm = Column(String(32))
+    name = Column(String(255))
+    phone = Column(String(64), index=True)
     address = Column(Text)
-
     orders = relationship("Order", back_populates="customer")
 
 class Order(Base):
     __tablename__ = "orders"
     id = Column(Integer, primary_key=True)
-    order_code = Column(String(64), nullable=False, unique=True, index=True)
-    external_id = Column(String(80), unique=True, index=True)
-    parent_id = Column(Integer, ForeignKey("orders.id"))
-    customer_id = Column(Integer, ForeignKey("customers.id"))
-    type = Column(ENUM(OrderType), nullable=False)
-    status = Column(ENUM(OrderStatus), default=OrderStatus.CONFIRMED, index=True)
-    notes = Column(Text)
+    order_code = Column(String(64), unique=True, index=True)
+    type = Column(String(16))          # OUTRIGHT | INSTALMENT | RENTAL
+    status = Column(String(16), default="CONFIRMED")  # CONFIRMED | RETURNED | CANCELLED
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    due_date = Column(Date)
-    return_due_date = Column(Date)
-    returned_at = Column(DateTime(timezone=True))
-    collected_at = Column(DateTime(timezone=True))
 
+    customer_id = Column(Integer, ForeignKey("customers.id"))
     customer = relationship("Customer", back_populates="orders")
+
     items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="order", cascade="all, delete-orphan")
     events = relationship("Event", back_populates="order", cascade="all, delete-orphan")
-    plan = relationship("PaymentPlan", back_populates="order", uselist=False, cascade="all, delete-orphan")
     ledger = relationship("LedgerEntry", back_populates="order", cascade="all, delete-orphan")
-    parent = relationship("Order", remote_side=[id])
+    plan = relationship("PaymentPlan", back_populates="order", uselist=False, cascade="all, delete-orphan")
 
 class OrderItem(Base):
     __tablename__ = "order_items"
     id = Column(Integer, primary_key=True)
     order_id = Column(Integer, ForeignKey("orders.id"), index=True)
     sku = Column(String(64))
-    name = Column(String(200), nullable=False)
-    qty = Column(Integer)
-    unit_price = Column(Numeric(12, 2), default=0)
+    name = Column(String(255))
+    qty = Column(Integer, default=1)
+    unit_price = Column(Numeric(12,2), default=0)
 
     order = relationship("Order", back_populates="items")
 
@@ -78,8 +51,8 @@ class Payment(Base):
     __tablename__ = "payments"
     id = Column(Integer, primary_key=True)
     order_id = Column(Integer, ForeignKey("orders.id"), index=True)
-    amount = Column(Numeric(12, 2), nullable=False)
-    method = Column(String(50), nullable=False)
+    amount = Column(Numeric(12,2))
+    method = Column(String(32), default="CASH")
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
     order = relationship("Order", back_populates="payments")
@@ -88,9 +61,7 @@ class Event(Base):
     __tablename__ = "events"
     id = Column(Integer, primary_key=True)
     order_id = Column(Integer, ForeignKey("orders.id"), index=True)
-    type = Column(ENUM(EventType))
-    reason = Column(Text)
-    notes = Column(Text)
+    type = Column(String(32))  # RETURN | COLLECT | INSTALMENT_CANCEL | BUYBACK
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
     order = relationship("Order", back_populates="events")
@@ -99,12 +70,10 @@ class PaymentPlan(Base):
     __tablename__ = "payment_plans"
     id = Column(Integer, primary_key=True)
     order_id = Column(Integer, ForeignKey("orders.id"), index=True)
-    cadence = Column(String(20), default="MONTHLY")
+    cadence = Column(String(16), default="MONTHLY")
     term_months = Column(Integer)
-    monthly_amount = Column(Numeric(12, 2))
+    monthly_amount = Column(Numeric(12,2))
     start_date = Column(Date)
-    end_date = Column(Date)
-    active = Column(Integer, default=1)
 
     order = relationship("Order", back_populates="plan")
 
@@ -112,34 +81,40 @@ class LedgerEntry(Base):
     __tablename__ = "ledger_entries"
     id = Column(Integer, primary_key=True)
     order_id = Column(Integer, ForeignKey("orders.id"), index=True)
-    kind = Column(ENUM(LedgerKind))
-    amount = Column(Numeric(12, 2))
-    period = Column(String(7))
-    entry_date = Column(Date, default=date.today)
+    kind = Column(String(32))  # INITIAL_CHARGE | ADJUSTMENT
+    amount = Column(Numeric(12,2), default=0)
     note = Column(Text)
 
     order = relationship("Order", back_populates="ledger")
 
+class Delivery(Base):
+    __tablename__ = "deliveries"
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), index=True)
+    outbound_date = Column(Date)
+    outbound_time = Column(String(8))
+    return_date = Column(Date)
+    return_time = Column(String(8))
+    status = Column(String(24), default="SCHEDULED")  # SCHEDULED|DONE|CANCELLED
+    notes = Column(Text)
+
+    order = relationship("Order")
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), index=True)
+    action = Column(String(64))
+    meta = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+    order = relationship("Order")
+
 class IdempotencyKey(Base):
     __tablename__ = "idempotency_keys"
     id = Column(Integer, primary_key=True)
-    key = Column(String(128), nullable=False, unique=True)
+    key = Column(String(64), unique=True, index=True)
     method = Column(String(8))
-    path = Column(Text)
+    path = Column(String(256))
     status_code = Column(Integer)
-    response_body = Column(LargeBinary)
-    content_type = Column(String(100))
-
-class CodeReservation(Base):
-    __tablename__ = "code_reservations"
-    id = Column(Integer, primary_key=True)
-    code = Column(String(64), nullable=False, unique=True)
-
-class Job(Base):
-    __tablename__ = "jobs"
-    id = Column(Integer, primary_key=True)
-    job_id = Column(String(64), unique=True)
-    kind = Column(String(20))
-    status = Column(String(20))
-    result_url = Column(Text)
-    error = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)

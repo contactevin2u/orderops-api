@@ -1,34 +1,19 @@
-﻿fastapi
-uvicorn[standard]
+fastapi>=0.111
+starlette>=0.37
+uvicorn[standard]>=0.30
 orjson
 sqlalchemy>=2.0
-psycopg2-binary
-alembic
-pydantic>=2
-pydantic-settings
-python-dotenv
-openai>=1.40.0
-pgvector
-prometheus-client
-sentry-sdk
-reportlab
-boto3
-python-multipart
-xlsxwriter
-python-dateutil>=2.9.0.post0
-openpyxl>=3.1.5
-fastapi>=0.111
-uvicorn[standard]>=0.30
 psycopg2-binary>=2.9
 alembic>=1.13
 pydantic>=2.7
 pydantic-settings>=2.4
-python-dateutil>=2.9
-openpyxl>=3.1
-starlette>=0.37
-openai>=1.35.7
+python-dotenv
+openai>=1.40.0
+prometheus-client
+sentry-sdk
+python-multipart
+python-dateutil>=2.9.0.post0
+openpyxl>=3.1.5
 spacy>=3.7.4
-
+# spaCy English model (single entry)
 en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
-
-en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
