@@ -1,15 +1,18 @@
-FROM python:3.11-slim
+﻿FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
+
+# System deps for psycopg2
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential libpq-dev && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# cache-bust switch (edit date to force rebuild if needed)
-ARG CACHE_BUST=2025-08-18
-
+# App & migrations
 COPY app ./app
 COPY alembic.ini ./alembic.ini
 COPY alembic ./alembic
