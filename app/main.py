@@ -1,5 +1,6 @@
-﻿from fastapi import FastAPI, Response, HTTPException, Query, Header
+from fastapi import FastAPI, Response, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.staticfiles import StaticFiles
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal, List, Dict, Any
@@ -297,140 +298,85 @@ def post_event(code: str, body: EventIn):
         return {"ok": True, "code": code, "event": body.event}
 
 @app.post("/parse")
-def parse(body: ParseIn):
-    text = body.text or ""
-    intent = None
-    hints = spacy_extract_hints(text, body.lang)
-    intent = hints.get("intent")
+def parse(body: ParseIn, idem_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
+    # Optional OpenAI client (present elsewhere in file)
+    global openai_client
+    result = parse_whatsapp(body.text, openai_client=openai_client if body.matcher == "ai" and openai_client is not None else None)
+    # keep original response shape
+    return result
 
-    # Try AI (strict JSON schema). Fallback to spaCy-only if AI fails or not configured.
-    data = None
-    if "openai_client" in globals() and openai_client is not None:
-        SCHEMA = {
-            "name": "order_parse",
-            "schema": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "order_code": {"type": ["string","null"]},
-                    "customer_name": {"type": ["string","null"]},
-                    "phone": {"type": ["string","null"]},
-                    "address": {"type": ["string","null"]},
-                    "items": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "name": {"type":"string"},
-                                "sku": {"type":["string","null"]},
-                                "qty": {"type":"integer","minimum":1, "default":1},
-                                "unit_price": {"type":["number","null"]},
-                                "rent_monthly": {"type":["number","null"]},
-                                "buyback_rate": {"type":["number","null"]}
-                            },
-                            "required": ["name"]
-                        }
-                    },
-                    "delivery": {
-                        "type":"object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "outbound_fee": {"type":["number","null"]},
-                            "return_fee": {"type":["number","null"]}
-                        },
-                        "required": ["outbound_fee","return_fee"]
-                    },
-                    "totals": {
-                        "type":"object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "total": {"type":["number","null"]},
-                            "paid": {"type":["number","null"]},
-                            "balance": {"type":["number","null"]}
-                        },
-                        "required": ["total","paid","balance"]
-                    },
-                    "schedule": {
-                        "type":"object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "date": {"type":["string","null"]},
-                            "time": {"type":["string","null"]}
-                        },
-                        "required": ["date","time"]
-                    },
-                    "plan": {
-                        "type":"object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "months": {"type":["integer","null"]},
-                            "start_date": {"type":["string","null"]}
-                        },
-                        "required": ["months","start_date"]
-                    },
-                    "intent": {"type":["string","null"], "enum": ["RETURN","COLLECT","INSTALMENT_CANCEL","BUYBACK", None]},
-                    "type_hint": {"type":["string","null"], "enum": ["RENTAL","OUTRIGHT", None]}
-                },
-                "required": ["customer_name","phone","items","totals","intent"]
-            }
-        }
+from .storage import SessionLocal, OrderMeta, OrderItem, Charge, Payment, Event, Delivery, compute_rental_accrual
+try:
+    from .storage import SessionLocal, OrderMeta, OrderItem, Charge, Payment, Event, Delivery, compute_rental_accrual
+except Exception:
+    pass
+@app.get("/calendar")
+def calendar(from_date: date | None = None, to_date: date | None = None):
+    with SessionLocal() as s:
+        rows = s.query(Delivery).all()
+        out = []
+        for d in rows:
+            if d.outbound_date:
+                dt = d.outbound_date.date()
+                if from_date and dt < from_date:
+                    pass
+                elif to_date and dt > to_date:
+                    pass
+                else:
+                    out.append({
+                        "order_code": d.order_code,
+                        "date": dt.isoformat(),
+                        "time": d.outbound_time,
+                        "kind": "OUTBOUND",
+                        "status": d.status
+                    })
+            if d.return_date:
+                dt2 = d.return_date.date()
+                if from_date and dt2 < from_date:
+                    pass
+                elif to_date and dt2 > to_date:
+                    pass
+                else:
+                    out.append({
+                        "order_code": d.order_code,
+                        "date": dt2.isoformat(),
+                        "time": d.return_time,
+                        "kind": "RETURN",
+                        "status": d.status
+                    })
+        return {"events": out}
+@app.get("/reports/aging")
+def report_aging(as_of: date | None = None):
+    as_of = as_of or datetime.utcnow().date()
+    buckets = {"0-30":0.0,"31-60":0.0,"61-90":0.0,"90+":0.0}
+    rows = []
+    with SessionLocal() as s:
+        metas = s.query(OrderMeta).all()
+        for m in metas:
+            items = s.query(OrderItem).filter_by(order_code=m.order_code).all()
+            charges = s.query(Charge).filter_by(order_code=m.order_code).all()
+            pays = s.query(Payment).filter_by(order_code=m.order_code).all()
 
-        try:
-            # Build concise hint line for the model
-            hint_line = {
-                "order_code": hints.get("order_code"),
-                "customer_name": hints.get("customer_name"),
-                "phone": hints.get("phone"),
-                "item_names": [i["name"] for i in (hints.get("items") or [])],
-                "type_hint": hints.get("type_hint"),
-                "intent": hints.get("intent"),
-                "delivery": hints.get("delivery"),
-                "totals": hints.get("totals"),
-                "schedule": hints.get("schedule")
-            }
+            principal = sum(c.amount for c in charges if c.kind == "PRINCIPAL")
+            delivery  = sum(c.amount for c in charges if c.kind in ("DELIVERY_OUTBOUND","DELIVERY_RETURN"))
+            penalty   = sum(c.amount for c in charges if c.kind == "PENALTY")
+            credits   = sum(c.amount for c in charges if c.kind in ("BUYBACK_CREDIT","ADJUSTMENT"))
+            accrual   = 0.0
+            if m.type == "RENTAL" and m.plan_start_date:
+                start_d = m.plan_start_date.date() if hasattr(m.plan_start_date, "date") else m.plan_start_date
+                accrual = compute_rental_accrual(items, start_d, as_of)
+            paid      = sum(p.amount for p in pays)
+            total_due = principal + delivery + penalty + accrual + credits
+            outstanding = round(max(0.0, total_due - paid), 2)
 
-            prompt = f"""Extract order fields as strict JSON.
-If a field is unknown, use null. Respect units: 'RM' is currency MYR.
-Use these hints if they don't conflict with the text:
-Hints: {hint_line}
-
-Text:
-{text}
-"""
-
-            resp = openai_client.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),
-                messages=[
-                    {"role":"system","content":"You are a structured information extractor. Output ONLY a JSON that matches the provided schema."},
-                    {"role":"user","content":prompt}
-                ],
-                response_format={"type":"json_schema","json_schema":SCHEMA},
-                temperature=0.1
-            )
-            data = json.loads(resp.choices[0].message.content)
-        except Exception:
-            data = None
-
-    if not data:
-        # Graceful fallback with spaCy-only hints
-        data = {
-            "order_code": hints.get("order_code"),
-            "customer_name": hints.get("customer_name"),
-            "phone": hints.get("phone"),
-            "address": None,
-            "items": hints.get("items") or [],
-            "delivery": hints.get("delivery"),
-            "totals": hints.get("totals"),
-            "schedule": hints.get("schedule"),
-            "plan": {"months": None, "start_date": None},
-            "intent": intent,
-            "type_hint": hints.get("type_hint"),
-        }
-
-    code = data.get("order_code") or hints.get("order_code")
-    return {
-        "parsed": {"ai": data, "matcher": "ai", "lang": body.lang},
-        "match": {"order_code": code, "reason": "ai+spacy"} if code else None,
-        "intent": data.get("intent") or intent
-    }
+            if outstanding <= 0:
+                continue
+            start_for_age = m.plan_start_date.date() if (m.plan_start_date and hasattr(m.plan_start_date,"date")) else (m.plan_start_date or as_of)
+            age_days = (as_of - start_for_age).days if start_for_age else 0
+            if   age_days <= 30: bucket = "0-30"
+            elif age_days <= 60: bucket = "31-60"
+            elif age_days <= 90: bucket = "61-90"
+            else:                bucket = "90+"
+            buckets[bucket] += outstanding
+            rows.append({"code": m.order_code, "customer": m.customer_name, "type": m.type, "age_days": age_days, "outstanding": outstanding})
+    return {"as_of": as_of.isoformat(), "buckets": buckets, "rows": rows}
