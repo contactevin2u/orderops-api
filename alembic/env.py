@@ -1,6 +1,6 @@
-from logging.config import fileConfig
+﻿from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
-from alembic import context
+import os`r`nfrom alembic import context
 import os, sys
 
 # this is the Alembic Config object, which provides
@@ -51,3 +51,4 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+
