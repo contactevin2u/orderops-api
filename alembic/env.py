@@ -6,7 +6,13 @@ import os, sys
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
-
+# prefer env DATABASE_URL if present
+try:
+    section = config.get_section(config.config_ini_section)
+    if section is not None:
+        section['sqlalchemy.url'] = os.getenv('DATABASE_URL', section.get('sqlalchemy.url'))
+except Exception:
+    pass
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -51,4 +57,5 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+
 
