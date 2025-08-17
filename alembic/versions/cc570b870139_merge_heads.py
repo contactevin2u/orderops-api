@@ -1,13 +1,13 @@
-\"\"\"merge heads to unify migration graph
+"""merge heads to unify migration graph
 
-Revision ID: 222b3db5248c
+Revision ID: cc570b870139
 Revises: 0002_ops_extras, 1f1b66ee3e31
-Create Date: 2025-08-17 12:38:31
-\"\"\"
+Create Date: 2025-08-17 12:41:29
+"""
 from alembic import op
 import sqlalchemy as sa
 
-revision = "222b3db5248c"
+revision = "cc570b870139"
 down_revision = ('0002_ops_extras', '1f1b66ee3e31',)
 branch_labels = None
 depends_on = None
