@@ -304,3 +304,5 @@ def parse(body: ParseIn, idem_key: Optional[str] = Header(default=None, alias="I
     result = parse_whatsapp(body.text, openai_client=openai_client if body.matcher == "ai" and openai_client is not None else None)
     # keep original response shape
     return result
+
+from .storage import SessionLocal, OrderMeta, OrderItem, Charge, Payment, Event, Delivery, compute_rental_accrual
