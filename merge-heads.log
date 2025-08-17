@@ -1,0 +1,42 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20250817122527
+Username: DESKTOP-LM0TCJT\User
+RunAs User: DESKTOP-LM0TCJT\User
+Configuration Name: 
+Machine: DESKTOP-LM0TCJT (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -NoExit -Command Start-Transcript -Path .\merge-heads.log -Append; 
+   .\Alembic-Merge-Heads.ps1; 
+   Stop-Transcript
+Process ID: 15032
+PSVersion: 5.1.26100.4768
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.4768
+BuildVersion: 10.0.26100.4768
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Transcript started, output file is .\merge-heads.log
+.\Alembic-Merge-Heads.ps1 : The term '.\Alembic-Merge-Heads.ps1' is not recognized as the name of a cmdlet, function, 
+script file, or operable program. Check the spelling of the name, or if a path was included, verify that the path is 
+correct and try again.
+At line:2 char:4
++    .\Alembic-Merge-Heads.ps1;
++    ~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (.\Alembic-Merge-Heads.ps1:String) [], CommandNotFoundException
+    + FullyQualifiedErrorId : CommandNotFoundException
+.\Alembic-Merge-Heads.ps1 : The term '.\Alembic-Merge-Heads.ps1' is not recognized as the name of a cmdlet, function,
+script file, or operable program. Check the spelling of the name, or if a path was included, verify that the path is
+correct and try again.
+At line:2 char:4
++    .\Alembic-Merge-Heads.ps1;
++    ~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (.\Alembic-Merge-Heads.ps1:String) [], CommandNotFoundException
+    + FullyQualifiedErrorId : CommandNotFoundException
+
+**********************
+Windows PowerShell transcript end
+End time: 20250817122527
+**********************
