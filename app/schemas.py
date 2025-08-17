@@ -1,9 +1,9 @@
-from pydantic import BaseModel, Field
+﻿from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from datetime import datetime
 
 class ItemIn(BaseModel):
-    text: str
+    text: Optional[str] = None
     item_type: Literal["OUTRIGHT", "RENTAL", "INSTALMENT"]
     sku: Optional[str] = None
     name: Optional[str] = None

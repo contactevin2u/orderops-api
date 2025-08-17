@@ -1,4 +1,4 @@
-from typing import Dict, Any, List
+﻿from typing import Dict, Any, List
 from .config import get_settings
 from openai import OpenAI
 import json
@@ -36,7 +36,7 @@ OMS_SCHEMA = {
                         "months": {"type": ["integer", "null"]},
                         "monthly_amount": {"type": ["number", "null"]}
                     },
-                    "required": ["text", "item_type"]
+                    "required": ["item_type"]
                 }
             },
             "subtotal": {"type": ["number", "null"]},

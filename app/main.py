@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Body, Response
+﻿from fastapi import FastAPI, Depends, HTTPException, Body, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
@@ -122,6 +122,20 @@ def parse(text: str = Body(..., media_type="text/plain"), db: Session = Depends(
             pass
 
     parsed = parse_message(text)
+
+    # --- sanitize items (safe defaults) ---
+    items = parsed.get("items", []) or []
+    for item in items:
+        if item.get("text") is None:
+            item["text"] = item.get("name") or ""
+        if item.get("item_type") is None:
+            item["item_type"] = "OUTRIGHT"
+        if item.get("line_total") is None and item.get("qty") is not None and item.get("unit_price") is not None:
+            try:
+                item["line_total"] = float(item["qty"]) * float(item["unit_price"])
+            except Exception:
+                pass
+    parsed["items"] = items
 
     # Map SKUs
     for item in parsed.get("items", []):
@@ -379,3 +393,4 @@ def export_cash(start: str, end: str, db: Session = Depends(get_db)):
         df.to_excel(writer, sheet_name="cash", index=False)
     bio.seek(0)
     return Response(content=bio.read(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
