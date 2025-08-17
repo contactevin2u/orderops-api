@@ -298,49 +298,139 @@ def post_event(code: str, body: EventIn):
 
 @app.post("/parse")
 def parse(body: ParseIn):
-    # intent hints
-    txt = body.text or ""
-    t = txt.upper()
+    text = body.text or ""
     intent = None
-    for key, val in {
-        "INSTALMENT_CANCEL": ["INSTALMENT CANCEL","INSTALLMENT CANCEL","CANCEL INSTALMENT","BATAL ANSURAN"],
-        "BUYBACK": ["BUYBACK","SELL BACK","SELLBACK","JUAL BALIK"],
-        "RETURN": ["RETURN","PULANG","HANTAR BALIK"],
-        "COLLECT": ["COLLECT","AMBIL BALIK","PICKUP","PICK UP"],
-    }.items():
-        if any(k in t for k in val): intent = key; break
+    hints = spacy_extract_hints(text, body.lang)
+    intent = hints.get("intent")
 
-    # Rapidfuzz + OpenAI hybrid (kept simple here)
-    code = None
-    m = re.search(r"\b([A-Z]{2,5}-\d{3,6}|\bKP\d{3,6}\b|OS-\d{3,6})\b", t)
-    if m: code = m.group(1)
+    # Try AI (strict JSON schema). Fallback to spaCy-only if AI fails or not configured.
+    data = None
+    if "openai_client" in globals() and openai_client is not None:
+        SCHEMA = {
+            "name": "order_parse",
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "order_code": {"type": ["string","null"]},
+                    "customer_name": {"type": ["string","null"]},
+                    "phone": {"type": ["string","null"]},
+                    "address": {"type": ["string","null"]},
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "name": {"type":"string"},
+                                "sku": {"type":["string","null"]},
+                                "qty": {"type":"integer","minimum":1, "default":1},
+                                "unit_price": {"type":["number","null"]},
+                                "rent_monthly": {"type":["number","null"]},
+                                "buyback_rate": {"type":["number","null"]}
+                            },
+                            "required": ["name"]
+                        }
+                    },
+                    "delivery": {
+                        "type":"object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "outbound_fee": {"type":["number","null"]},
+                            "return_fee": {"type":["number","null"]}
+                        },
+                        "required": ["outbound_fee","return_fee"]
+                    },
+                    "totals": {
+                        "type":"object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "total": {"type":["number","null"]},
+                            "paid": {"type":["number","null"]},
+                            "balance": {"type":["number","null"]}
+                        },
+                        "required": ["total","paid","balance"]
+                    },
+                    "schedule": {
+                        "type":"object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "date": {"type":["string","null"]},
+                            "time": {"type":["string","null"]}
+                        },
+                        "required": ["date","time"]
+                    },
+                    "plan": {
+                        "type":"object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "months": {"type":["integer","null"]},
+                            "start_date": {"type":["string","null"]}
+                        },
+                        "required": ["months","start_date"]
+                    },
+                    "intent": {"type":["string","null"], "enum": ["RETURN","COLLECT","INSTALMENT_CANCEL","BUYBACK", None]},
+                    "type_hint": {"type":["string","null"], "enum": ["RENTAL","OUTRIGHT", None]}
+                },
+                "required": ["customer_name","phone","items","totals","intent"]
+            }
+        }
 
-    if body.matcher in ("ai","hybrid") and openai_client:
-        prompt = f"""Extract JSON with keys:
-- order_code (string or null)
-- customer_name (string or null)
-- phone (string or null)
-- address (string or null)
-- delivery_date (YYYY-MM-DD or null)
-- delivery_time (HH:MM or null)
-- type (OUTRIGHT|INSTALMENT|RENTAL or null)
-- items: [{{ sku?, name, qty, unit_price?, rent_monthly? }}]
-- intent (RETURN|COLLECT|INSTALMENT_CANCEL|BUYBACK or null)
-Text:
-{txt}
-"""
         try:
+            # Build concise hint line for the model
+            hint_line = {
+                "order_code": hints.get("order_code"),
+                "customer_name": hints.get("customer_name"),
+                "phone": hints.get("phone"),
+                "item_names": [i["name"] for i in (hints.get("items") or [])],
+                "type_hint": hints.get("type_hint"),
+                "intent": hints.get("intent"),
+                "delivery": hints.get("delivery"),
+                "totals": hints.get("totals"),
+                "schedule": hints.get("schedule")
+            }
+
+            prompt = f"""Extract order fields as strict JSON.
+If a field is unknown, use null. Respect units: 'RM' is currency MYR.
+Use these hints if they don't conflict with the text:
+Hints: {hint_line}
+
+Text:
+{text}
+"""
+
             resp = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role":"system","content":"You output ONLY valid JSON."},
-                          {"role":"user","content":prompt}],
-                response_format={"type":"json_object"}
+                model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),
+                messages=[
+                    {"role":"system","content":"You are a structured information extractor. Output ONLY a JSON that matches the provided schema."},
+                    {"role":"user","content":prompt}
+                ],
+                response_format={"type":"json_schema","json_schema":SCHEMA},
+                temperature=0.1
             )
             data = json.loads(resp.choices[0].message.content)
-            code = data.get("order_code") or code
-            if not intent: intent = data.get("intent")
-            return {"parsed": {"order": data, "matcher": body.matcher}, "match": {"order_code": code} if code else None, "event": intent}
         except Exception:
-            pass
+            data = None
 
-    return {"parsed": {"order": {}, "event": intent}, "match": {"order_code": code} if code else None}
+    if not data:
+        # Graceful fallback with spaCy-only hints
+        data = {
+            "order_code": hints.get("order_code"),
+            "customer_name": hints.get("customer_name"),
+            "phone": hints.get("phone"),
+            "address": None,
+            "items": hints.get("items") or [],
+            "delivery": hints.get("delivery"),
+            "totals": hints.get("totals"),
+            "schedule": hints.get("schedule"),
+            "plan": {"months": None, "start_date": None},
+            "intent": intent,
+            "type_hint": hints.get("type_hint"),
+        }
+
+    code = data.get("order_code") or hints.get("order_code")
+    return {
+        "parsed": {"ai": data, "matcher": "ai", "lang": body.lang},
+        "match": {"order_code": code, "reason": "ai+spacy"} if code else None,
+        "intent": data.get("intent") or intent
+    }
