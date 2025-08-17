@@ -7,8 +7,6 @@ if [ -f ./alembic.ini ]; then
   echo "[entrypoint] Running Alembic migrations..."
   # show heads; NEVER pass '-n -20'
   alembic heads || true
-  # short history for context (optional)
-  alembic history -n 20 || true
   # single-head path, else merge-heads path
   alembic upgrade head || alembic upgrade heads
 fi

@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Response, HTTPException, Query, Header
+import app.audit_hooks  # register SQLAlchemy event listeners
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -171,30 +172,30 @@ def create_order(body: OrderCreate, idem_key: Optional[str] = Header(default=Non
         s.add(order); s.flush()
 
         for it in body.items:
-            s.add(OrderItem(order_id=order.id, sku=it.sku, name=it.name, qty=it.qty, unit_price=(it.unit_price or 0)))
+            s.add(OrderItem(order_id=order.id, order_code=order.code, sku=it.sku, name=it.name, qty=it.qty, unit_price=(it.unit_price or 0)))
 
         if body.type in ("OUTRIGHT","INSTALMENT"):
             principal = sum((it.unit_price or 0) * it.qty for it in body.items)
             if principal > 0:
-                s.add(LedgerEntry(order_id=order.id, kind="INITIAL_CHARGE", amount=principal, note="Items principal"))
+                s.add(LedgerEntry(order_id=order.id, order_code=order.code, kind="INITIAL_CHARGE", amount=principal, note="Items principal"))
 
         if body.type == "RENTAL" or (body.plan_monthly_amount or body.plan_months or body.plan_start_date):
             s.add(PaymentPlan(
-                order_id=order.id, cadence="MONTHLY",
+                order_id=order.id, order_code=order.code, cadence="MONTHLY",
                 term_months=body.plan_months,
                 monthly_amount=body.plan_monthly_amount or sum((it.rent_monthly or 0) * it.qty for it in body.items),
                 start_date=body.plan_start_date or now.date()
             ))
 
         if body.delivery and body.delivery.prepaid_outbound and body.delivery.outbound_fee:
-            s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.delivery.outbound_fee, note="Prepaid outbound delivery"))
+            s.add(LedgerEntry(order_id=order.id, order_code=order.code, kind="ADJUSTMENT", amount=body.delivery.outbound_fee, note="Prepaid outbound delivery"))
         if body.delivery and body.delivery.prepaid_return and body.delivery.return_fee:
-            s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.delivery.return_fee, note="Prepaid return delivery"))
+            s.add(LedgerEntry(order_id=order.id, order_code=order.code, kind="ADJUSTMENT", amount=body.delivery.return_fee, note="Prepaid return delivery"))
 
         if body.schedule and (body.schedule.date or body.schedule.time):
-            s.add(Delivery(order_id=order.id, outbound_date=body.schedule.date or now.date(), outbound_time=body.schedule.time, status="SCHEDULED"))
+            s.add(Delivery(order_id=order.id, order_code=order.code, outbound_date=body.schedule.date or now.date(), outbound_time=body.schedule.time, status="SCHEDULED"))
 
-        s.add(AuditLog(order_id=order.id, action="CREATE_ORDER", meta=json.dumps({"source":"api"})))
+        s.add(AuditLog(order_id=order.id, order_code=order.code, action="CREATE_ORDER", meta=json.dumps({"source":"api"})))
         s.commit()
         return {"ok": True, "code": body.code}
 
@@ -250,7 +251,7 @@ def payment(code: str, body: PaymentIn):
         order = s.query(Order).filter_by(order_code=code).first()
         if not order:
             raise HTTPException(404, detail="Order not found")
-        p = Payment(order_id=order.id, amount=body.amount, method=(body.method or "CASH"), created_at=now)
+        p = Payment(order_id=order.id, order_code=order.code, amount=body.amount, method=(body.method or "CASH"), created_at=now)
         s.add(p); s.commit()
         return {"ok": True, "payment_id": p.id, "code": code, "amount": body.amount}
 
@@ -265,9 +266,9 @@ def post_event(code: str, body: EventIn):
             raise HTTPException(400, detail="Terminal event already recorded for this order")
         if body.event == "INSTALMENT_CANCEL":
             if body.penalty and body.penalty > 0:
-                s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.penalty, note="Instalment cancel penalty"))
+                s.add(LedgerEntry(order_id=order.id, order_code=order.code, kind="ADJUSTMENT", amount=body.penalty, note="Instalment cancel penalty"))
             if body.delivery_return_fee and body.delivery_return_fee > 0:
-                s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.delivery_return_fee, note="Return delivery (cancel)"))
+                s.add(LedgerEntry(order_id=order.id, order_code=order.code, kind="ADJUSTMENT", amount=body.delivery_return_fee, note="Return delivery (cancel)"))
             order.status = "CANCELLED"
         elif body.event == "BUYBACK":
             rate = max(0.0, min(1.0, body.buyback_rate or 0.5))
@@ -276,14 +277,14 @@ def post_event(code: str, body: EventIn):
                 if it.unit_price:
                     credit += float(it.unit_price) * it.qty * rate
             if credit != 0:
-                s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=-abs(credit), note="Buyback credit"))
+                s.add(LedgerEntry(order_id=order.id, order_code=order.code, kind="ADJUSTMENT", amount=-abs(credit), note="Buyback credit"))
             order.status = "RETURNED"
         elif body.event in ("RETURN","COLLECT"):
             if body.event=="RETURN" and body.delivery_return_fee and body.delivery_return_fee>0:
-                s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.delivery_return_fee, note="Return delivery"))
+                s.add(LedgerEntry(order_id=order.id, order_code=order.code, kind="ADJUSTMENT", amount=body.delivery_return_fee, note="Return delivery"))
             order.status = "RETURNED"
-        s.add(Event(order_id=order.id, type=body.event, created_at=now))
-        s.add(AuditLog(order_id=order.id, action=("EVENT_"+body.event), meta=json.dumps({"source":"api"})))
+        s.add(Event(order_id=order.id, order_code=order.code, type=body.event, created_at=now))
+        s.add(AuditLog(order_id=order.id, order_code=order.code, action=("EVENT_"+body.event), meta=json.dumps({"source":"api"})))
         s.commit()
         return {"ok": True, "code": code, "event": body.event}
 
