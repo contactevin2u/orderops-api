@@ -42,8 +42,9 @@ def upgrade():
     
 
     # Payments
-    
+    op.create_index('ix_orders_code','orders',['code'],unique=True,if_not_exists=True)
 
 def downgrade():
     # Keep downgrade conservative
     pass
+
