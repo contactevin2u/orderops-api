@@ -1,13 +1,12 @@
-﻿"""add order_id FKs for deliveries + audit_logs
+\"\"\"add order_id FKs for deliveries + audit_logs (robust backfill)
 
 Revision ID: 1f1b66ee3e31
-Revises: 4f3e44d8ade6
-Create Date: 2025-08-17 12:20:20
-"""
+Revises: "4f3e44d8ade6"
+Create Date: 2025-08-17 12:45:22
+\"\"\"
 from alembic import op
 import sqlalchemy as sa
 
-# revision identifiers, used by Alembic.
 revision = "1f1b66ee3e31"
 down_revision = "4f3e44d8ade6"
 branch_labels = None
@@ -19,12 +18,33 @@ def upgrade():
     op.create_index('ix_deliveries_order_id', 'deliveries', ['order_id'], unique=False)
     op.create_foreign_key('fk_deliveries_order_id_orders', 'deliveries', 'orders', ['order_id'], ['id'])
 
-    op.execute("""
-        UPDATE deliveries d
-        SET order_id = o.id
-        FROM orders o
-        WHERE d.order_id IS NULL AND d.order_code = o.code
-    """)
+    # Robust backfill: join on orders.code if it exists, else orders.order_code if that exists
+    op.execute(\"\"\"
+        DO yyyy-MM-dd HH:mm:ss
+        DECLARE orders_col text;
+        BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_name='orders' AND column_name='code') THEN
+            orders_col := 'code';
+          ELSIF EXISTS (SELECT 1 FROM information_schema.columns
+                         WHERE table_name='orders' AND column_name='order_code') THEN
+            orders_col := 'order_code';
+          ELSE
+            orders_col := NULL;
+          END IF;
+
+          IF orders_col IS NOT NULL
+             AND EXISTS (SELECT 1 FROM information_schema.columns
+                          WHERE table_name='deliveries' AND column_name='order_code') THEN
+            EXECUTE format(__init__.py$
+              UPDATE deliveries d
+              SET order_id = o.id
+              FROM orders o
+              WHERE d.order_id IS NULL AND d.order_code = o.%I
+            __init__.py$, orders_col);
+          END IF;
+        END yyyy-MM-dd HH:mm:ss;
+    \"\"\")
 
     op.alter_column('deliveries', 'order_id', existing_type=sa.Integer(), nullable=False)
 
@@ -33,30 +53,40 @@ def upgrade():
     op.create_index('ix_audit_logs_order_id', 'audit_logs', ['order_id'], unique=False)
     op.create_foreign_key('fk_audit_logs_order_id_orders', 'audit_logs', 'orders', ['order_id'], ['id'])
 
-    # Backfill only if audit_logs.order_code exists
-    op.execute("""
-        DO $$
+    # Backfill audit_logs.order_id if audit_logs.order_code exists, using whichever orders column exists
+    op.execute(\"\"\"
+        DO yyyy-MM-dd HH:mm:ss
+        DECLARE orders_col text;
         BEGIN
-          IF EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name='audit_logs' AND column_name='order_code'
-          ) THEN
-            UPDATE audit_logs a
-            SET order_id = o.id
-            FROM orders o
-            WHERE a.order_id IS NULL AND a.order_code = o.code;
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_name='orders' AND column_name='code') THEN
+            orders_col := 'code';
+          ELSIF EXISTS (SELECT 1 FROM information_schema.columns
+                         WHERE table_name='orders' AND column_name='order_code') THEN
+            orders_col := 'order_code';
+          ELSE
+            orders_col := NULL;
           END IF;
-        END $$;
-    """)
+
+          IF orders_col IS NOT NULL
+             AND EXISTS (SELECT 1 FROM information_schema.columns
+                          WHERE table_name='audit_logs' AND column_name='order_code') THEN
+            EXECUTE format(__init__.py$
+              UPDATE audit_logs a
+              SET order_id = o.id
+              FROM orders o
+              WHERE a.order_id IS NULL AND a.order_code = o.%I
+            __init__.py$, orders_col);
+          END IF;
+        END yyyy-MM-dd HH:mm:ss;
+    \"\"\")
 
 def downgrade():
-    # audit_logs (drop order_id)
     with op.batch_alter_table('audit_logs') as batch_op:
         batch_op.drop_constraint('fk_audit_logs_order_id_orders', type_='foreignkey')
         batch_op.drop_index('ix_audit_logs_order_id')
         batch_op.drop_column('order_id')
 
-    # deliveries (drop order_id)
     with op.batch_alter_table('deliveries') as batch_op:
         batch_op.drop_constraint('fk_deliveries_order_id_orders', type_='foreignkey')
         batch_op.drop_index('ix_deliveries_order_id')
