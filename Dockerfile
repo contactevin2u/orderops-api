@@ -17,6 +17,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Add entrypoint that runs alembic, then launches uvicorn
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN sed -i '\''s/\r$//'\'' /entrypoint.sh && chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+# Add entrypoint that runs alembic, then launches uvicorn
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
@@ -24,7 +28,4 @@ RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 EXPOSE 8000
 CMD ["/entrypoint.sh"]
-
-COPY docker/entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
