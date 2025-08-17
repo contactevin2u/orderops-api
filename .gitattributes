@@ -1,1 +1,3 @@
-﻿*.py text eol=lf
+*.py text eol=lf
+alembic/** text eol=lf
+scripts/** text eol=lf
