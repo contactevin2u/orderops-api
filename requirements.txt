@@ -1,4 +1,4 @@
-fastapi
+﻿fastapi
 uvicorn[standard]
 orjson
 sqlalchemy>=2.0
@@ -8,7 +8,6 @@ pydantic>=2
 pydantic-settings
 python-dotenv
 openai>=1.40.0
-rapidfuzz
 pgvector
 prometheus-client
 sentry-sdk
@@ -26,5 +25,9 @@ pydantic>=2.7
 pydantic-settings>=2.4
 python-dateutil>=2.9
 openpyxl>=3.1
-rapidfuzz>=3.9
 starlette>=0.37
+openai>=1.35.7
+spacy>=3.7.4
+
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+
