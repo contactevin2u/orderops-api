@@ -1,30 +1,19 @@
-﻿from fastapi import FastAPI, Response, HTTPException, Query, Header
+from fastapi import FastAPI, Response, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.staticfiles import StaticFiles
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal, List, Dict, Any
 from datetime import datetime, date
-from io import BytesIO, StringIO
-import os, re, csv, json
+from io import BytesIO
+import os, json
 
-# ---- storage / models
-try:
-    from app.storage import (
-        SessionLocal, init_db, Order, Payment, Event,
-        OrderMeta, OrderItem, Charge,
-        Delivery, AuditLog, IdempotencyKey, compute_rental_accrual
-    )
-except Exception:
-    # Fallback if you kept earlier simpler storage
-    from app.storage import (
-        SessionLocal, init_db, Order, Payment, Event,
-        OrderMeta, OrderItem, Charge
-    )
-    Delivery = AuditLog = IdempotencyKey = None
-    def compute_rental_accrual(*args, **kwargs): return 0.0
+from app.db import SessionLocal
+from app.models import (
+    Order, OrderItem, Payment, Event, Customer, PaymentPlan, LedgerEntry,
+    Delivery, AuditLog, IdempotencyKey
+)
 
-# ---- optional OpenAI
+# Optional OpenAI client (kept tolerant)
 openai_client = None
 try:
     from openai import OpenAI
@@ -33,7 +22,7 @@ try:
 except Exception:
     openai_client = None
 
-# ---- XLSX
+# XLSX
 try:
     from openpyxl import Workbook
 except Exception:
@@ -45,7 +34,7 @@ app = FastAPI(title="OrderOps API")
 FRONTEND_ORIGINS = [o.strip() for o in os.getenv("FRONTEND_ORIGINS", "").split(",") if o.strip()]
 FRONTEND_REGEX = os.getenv("FRONTEND_ORIGIN_REGEX") or None
 if not FRONTEND_ORIGINS and not FRONTEND_REGEX:
-    FRONTEND_ORIGINS = ["http://localhost:3000"]  # safe default for local dev
+    FRONTEND_ORIGINS = ["http://localhost:3000"]  # local dev default
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,24 +45,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---- Static files (safe guard)
+# ---- Static files
 _files_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "files"))
 os.makedirs(_files_dir, exist_ok=True)
 app.mount("/files", StaticFiles(directory=_files_dir), name="files")
 
-# ---- Catalog (extend as needed)
+# Catalog (example)
 CATALOG = [
-    {"sku":"BED-2F","name":"Hospital Bed 2 Function","sale_price":2800.0,"rent_monthly":380.0,"buyback_rate":0.40},
-    {"sku":"BED-3F","name":"Hospital Bed 3 Function","sale_price":3800.0,"rent_monthly":480.0,"buyback_rate":0.45},
-    {"sku":"BED-5F","name":"Hospital Bed 5 Function","sale_price":5200.0,"rent_monthly":650.0,"buyback_rate":0.45},
-    {"sku":"BED-3F-AUTO","name":"Hospital Bed 3F Auto","sale_price":6200.0,"rent_monthly":780.0,"buyback_rate":0.45},
-    {"sku":"WHL-STEEL","name":"Auto Wheelchair (Steel)","sale_price":800.0,"rent_monthly":120.0,"buyback_rate":0.35},
-    {"sku":"WHL-ALU","name":"Auto Wheelchair (Aluminium)","sale_price":1200.0,"rent_monthly":160.0,"buyback_rate":0.35},
-    {"sku":"WHL-HD","name":"Heavy Duty Wheelchair","sale_price":1600.0,"rent_monthly":220.0,"buyback_rate":0.35},
+    {"sku":"BED-2F","name":"Hospital Bed 2F","sale_price":2800.0,"rent_monthly":380.0,"buyback_rate":0.40},
+    {"sku":"BED-3F","name":"Hospital Bed 3F","sale_price":3800.0,"rent_monthly":480.0,"buyback_rate":0.45},
     {"sku":"O2-5L","name":"Oxygen Concentrator 5L","sale_price":2800.0,"rent_monthly":420.0,"buyback_rate":0.40},
-    {"sku":"O2-10L","name":"Oxygen Concentrator 10L","sale_price":4300.0,"rent_monthly":580.0,"buyback_rate":0.40},
-    {"sku":"O2-TANK","name":"Oxygen Tank","sale_price":550.0,"rent_monthly":90.0,"buyback_rate":0.20},
-    {"sku":"TLM-CAN","name":"Canvas Mattress","sale_price":199.0,"rent_monthly":0.0,"buyback_rate":0.10},
 ]
 
 # ---- Schemas
@@ -113,6 +94,7 @@ class OrderCreate(BaseModel):
 
 class PaymentIn(BaseModel):
     amount: float = Field(gt=0)
+    method: Optional[str] = "CASH"
 
 class EventIn(BaseModel):
     event: Literal["RETURN","COLLECT","INSTALMENT_CANCEL","BUYBACK"]
@@ -125,328 +107,265 @@ class ParseIn(BaseModel):
     matcher: Literal["ai","rapidfuzz","hybrid"] = "hybrid"
     lang: Literal["en","ms"] = "en"
 
-# ---- util
-def rental_monthly_total(items: List[OrderItem]) -> float:
-    return sum((i.rent_monthly or 0) * i.qty for i in items)
+# ---- Helpers
+def _val(x): 
+    try: 
+        return x.value
+    except Exception:
+        return x
 
-def sum_charges(charges: List[Charge], kinds=None) -> float:
-    if kinds is None: return sum(c.amount for c in charges)
-    return sum(c.amount for c in charges if c.kind in kinds)
+def months_between(start: date, end: date) -> int:
+    return max(0, (end.year - start.year) * 12 + (end.month - start.month))
 
-def sum_payments(pays: List[Payment]) -> float:
-    return sum(p.amount for p in pays)
+def compute_accrual(order: Order, as_of: date) -> float:
+    # rental-only accrual
+    try:
+        if (_val(order.type) != "RENTAL"): 
+            return 0.0
+        plan = order.plan
+        if not plan or not plan.start_date or not plan.monthly_amount:
+            return 0.0
+        months = months_between(plan.start_date, as_of)
+        return round(float(plan.monthly_amount or 0) * months, 2)
+    except Exception:
+        return 0.0
 
-def compute_outstanding(meta, items, charges, pays, as_of: date) -> Dict[str, Any]:
-    accrual = 0.0
-    if meta and meta.type == "RENTAL" and meta.plan_start_date:
-        start = meta.plan_start_date.date() if hasattr(meta.plan_start_date, "date") else meta.plan_start_date
-        accrual = compute_rental_accrual(items, start, as_of)
-    principal = sum_charges(charges, ["PRINCIPAL"])
-    delivery = sum_charges(charges, ["DELIVERY_OUTBOUND","DELIVERY_RETURN"])
-    penalty  = sum_charges(charges, ["PENALTY"])
-    credits  = sum_charges(charges, ["BUYBACK_CREDIT","ADJUSTMENT"])
-    paid     = sum_payments(pays)
-    total_due = principal + delivery + penalty + accrual + credits
+def compute_outstanding(order: Order, as_of: date) -> Dict[str, Any]:
+    accrual = compute_accrual(order, as_of)
+    ledger_sum = sum(float(getattr(le, "amount", 0) or 0) for le in (order.ledger or []))
+    paid = sum(float(getattr(p, "amount", 0) or 0) for p in (order.payments or []))
+    total_due = ledger_sum + accrual
     outstanding = max(0.0, round(total_due - paid, 2))
-    return {"principal":principal,"delivery":delivery,"penalty":penalty,"accrual":accrual,"other_credits":credits,"paid":paid,"total_due":total_due,"outstanding":outstanding}
+    return {"accrual": accrual, "ledger": ledger_sum, "paid": paid, "total_due": total_due, "outstanding": outstanding}
 
-# ---- lifecycle
-@app.on_event("startup")
-def _startup(): init_db()
+# ---- metrics (include if file exists; no crash if missing)
+try:
+    from app.metrics import router as metrics_router
+    app.include_router(metrics_router)
+except Exception:
+    pass
 
-# ---- endpoints (same surface as we agreed)
 @app.get("/health")
-def health(): return {"ok": True}
+def health(): 
+    return {"ok": True}
 
 @app.get("/catalog")
-def catalog(): return {"items": CATALOG}
+def catalog(): 
+    return {"items": CATALOG}
 
 @app.post("/orders")
 def create_order(body: OrderCreate, idem_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
     now = datetime.utcnow()
     with SessionLocal() as s:
-        # idempotency (if table exists)
-        if IdempotencyKey and idem_key:
-            exists = s.query(IdempotencyKey).filter_by(key=idem_key, endpoint="/orders").first()
-            if exists: raise HTTPException(409, detail="Duplicate request")
-            s.add(IdempotencyKey(key=idem_key, endpoint="/orders", created_at=now))
+        if idem_key:
+            exists = s.query(IdempotencyKey).filter_by(key=idem_key, path="/orders").first()
+            if exists: 
+                raise HTTPException(409, detail="Duplicate request")
+            s.add(IdempotencyKey(key=idem_key, method="POST", path="/orders", status_code=202, created_at=now))
 
-        if s.get(Order, body.code):
+        if s.query(Order).filter_by(order_code=body.code).first():
             raise HTTPException(409, detail="Order code already exists")
 
-        s.add(Order(code=body.code, created_at=now))
-        s.add(OrderMeta(
-            order_code=body.code, type=body.type, status="OPEN",
-            customer_name=body.customer.name, phone=body.customer.phone, address=body.customer.address,
-            plan_months=body.plan_months, plan_monthly_amount=body.plan_monthly_amount,
-            plan_start_date=body.plan_start_date or now.date()
-        ))
-        for it in body.items:
-            s.add(OrderItem(order_code=body.code, sku=it.sku, name=it.name, qty=it.qty,
-                            unit_price=it.unit_price, rent_monthly=it.rent_monthly, buyback_rate=it.buyback_rate))
+        # customer upsert-ish by phone
+        cust = None
+        if body.customer.phone:
+            cust = s.query(Customer).filter_by(phone=body.customer.phone).first()
+        if not cust:
+            cust = Customer(name=body.customer.name, phone=body.customer.phone, address=body.customer.address)
+            s.add(cust); s.flush()
 
-        # charges
+        order = Order(order_code=body.code, customer=cust, type=body.type, status="CONFIRMED", created_at=now)
+        s.add(order); s.flush()
+
+        for it in body.items:
+            s.add(OrderItem(order_id=order.id, sku=it.sku, name=it.name, qty=it.qty, unit_price=(it.unit_price or 0)))
+
         if body.type in ("OUTRIGHT","INSTALMENT"):
             principal = sum((it.unit_price or 0) * it.qty for it in body.items)
             if principal > 0:
-                s.add(Charge(order_code=body.code, kind="PRINCIPAL", amount=principal, note="Items principal", created_at=now))
-        if body.delivery.prepaid_outbound and body.delivery.outbound_fee:
-            s.add(Charge(order_code=body.code, kind="DELIVERY_OUTBOUND", amount=body.delivery.outbound_fee, note="Prepaid outbound", created_at=now))
-        if body.delivery.prepaid_return and body.delivery.return_fee:
-            s.add(Charge(order_code=body.code, kind="DELIVERY_RETURN", amount=body.delivery.return_fee, note="Prepaid return", created_at=now))
+                s.add(LedgerEntry(order_id=order.id, kind="INITIAL_CHARGE", amount=principal, note="Items principal"))
 
-        # schedule (if Delivery table exists)
-        if Delivery and body.schedule and (body.schedule.date or body.schedule.time):
-            s.add(Delivery(order_code=body.code,
-                           outbound_date=datetime.combine(body.schedule.date or now.date(), datetime.min.time()),
-                           outbound_time=body.schedule.time or None,
-                           status="SCHEDULED"))
+        # plan for rental or if provided
+        if body.type == "RENTAL" or (body.plan_monthly_amount or body.plan_months or body.plan_start_date):
+            s.add(PaymentPlan(
+                order_id=order.id, cadence="MONTHLY",
+                term_months=body.plan_months,
+                monthly_amount=body.plan_monthly_amount or sum((it.rent_monthly or 0) * it.qty for it in body.items),
+                start_date=body.plan_start_date or now.date()
+            ))
 
-        if AuditLog:
-            s.add(AuditLog(order_code=body.code, action="CREATE_ORDER", meta={"source":"api"}, created_at=now))
+        # delivery fees (prepaid)
+        if body.delivery and body.delivery.prepaid_outbound and body.delivery.outbound_fee:
+            s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.delivery.outbound_fee, note="Prepaid outbound delivery"))
+        if body.delivery and body.delivery.prepaid_return and body.delivery.return_fee:
+            s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.delivery.return_fee, note="Prepaid return delivery"))
+
+        # schedule
+        if body.schedule and (body.schedule.date or body.schedule.time):
+            s.add(Delivery(order_id=order.id, outbound_date=body.schedule.date or now.date(), outbound_time=body.schedule.time, status="SCHEDULED"))
+
+        s.add(AuditLog(order_id=order.id, action="CREATE_ORDER", meta=json.dumps({"source":"api"})))
         s.commit()
-    return {"ok": True, "code": body.code}
+        return {"ok": True, "code": body.code}
 
 @app.get("/orders")
 def list_orders(q: Optional[str] = None,
                 type: Optional[str] = Query(default=None, pattern="^(OUTRIGHT|INSTALMENT|RENTAL)$"),
-                status: Optional[str] = Query(default=None, pattern="^(OPEN|CLOSED)$"),
+                status: Optional[str] = Query(default=None, pattern="^(CONFIRMED|RETURNED|CANCELLED)$"),
                 page: int = 1, page_size: int = 20, as_of: Optional[date] = None):
     as_of = as_of or datetime.utcnow().date()
     with SessionLocal() as s:
-        metas = s.query(OrderMeta).all()
-        result = []
-        for m in metas:
-            if type and m.type != type: continue
-            if status and m.status != status: continue
-            hay = f"{m.order_code} {m.customer_name or ''} {m.phone or ''}".lower()
+        orders = s.query(Order).all()
+        out = []
+        for o in orders:
+            if type and (o.type != type): continue
+            if status and (o.status != status): continue
+            hay = f"{o.order_code} {(o.customer.name if o.customer else '')} {(o.customer.phone if o.customer else '')}".lower()
             if q and q.lower() not in hay: continue
-            items = s.query(OrderItem).filter(OrderItem.order_code==m.order_code).all()
-            charges = s.query(Charge).filter(Charge.order_code==m.order_code).all()
-            pays = s.query(Payment).filter(Payment.order_code==m.order_code).all()
-            summary = compute_outstanding(m, items, charges, pays, as_of)
-            result.append({
-                "code": m.order_code, "type": m.type, "status": m.status,
-                "customer": {"name": m.customer_name, "phone": m.phone},
-                "created_at": s.get(Order, m.order_code).created_at.isoformat(),
+            summary = compute_outstanding(o, as_of)
+            out.append({
+                "code": o.order_code,
+                "type": o.type,
+                "status": o.status,
+                "customer": {"name": o.customer.name if o.customer else None, "phone": o.customer.phone if o.customer else None},
+                "created_at": (o.created_at.isoformat() if o.created_at else None),
                 "outstanding": summary["outstanding"]
             })
-        total = len(result); start = (page-1)*page_size; end = start+page_size
-        return {"page": page, "page_size": page_size, "total": total, "orders": result[start:end]}
+        total = len(out); start = (page-1)*page_size; end = start+page_size
+        return {"page": page, "page_size": page_size, "total": total, "orders": out[start:end]}
 
 @app.get("/orders/{code}")
 def get_order(code: str, as_of: Optional[date] = None):
     as_of = as_of or datetime.utcnow().date()
     with SessionLocal() as s:
-        order = s.get(Order, code)
-        if not order: raise HTTPException(404, detail="Order not found")
-        meta = s.get(OrderMeta, code)
-        items = s.query(OrderItem).filter(OrderItem.order_code==code).all()
-        charges = s.query(Charge).filter(Charge.order_code==code).all()
-        pays = s.query(Payment).filter(Payment.order_code==code).all()
-        events = s.query(Event).filter(Event.order_code==code).all()
-        summary = compute_outstanding(meta, items, charges, pays, as_of)
-        return {"order":{"code":code,"created_at":order.created_at.isoformat()},
-                "meta": meta.__dict__ if meta else None,
-                "items":[{k:getattr(i,k) for k in ("id","sku","name","qty","unit_price","rent_monthly","buyback_rate")} for i in items],
-                "charges":[{k:getattr(c,k) for k in ("id","kind","amount","note","created_at")} for c in charges],
-                "payments":[{k:getattr(p,k) for k in ("id","amount","created_at")} for p in pays],
-                "events":[{k:getattr(e,k) for k in ("id","kind","created_at")} for e in events],
-                "summary": summary}
+        order = s.query(Order).filter_by(order_code=code).first()
+        if not order:
+            raise HTTPException(404, detail="Order not found")
+        summary = compute_outstanding(order, as_of)
+        return {
+            "order":{"code":order.order_code,"created_at":order.created_at.isoformat() if order.created_at else None},
+            "meta": {"type": order.type, "status": order.status,
+                     "customer_name": (order.customer.name if order.customer else None),
+                     "phone": (order.customer.phone if order.customer else None)},
+            "items":[{"id":i.id,"sku":i.sku,"name":i.name,"qty":i.qty,"unit_price":float(i.unit_price or 0)} for i in (order.items or [])],
+            "payments":[{"id":p.id,"amount":float(p.amount or 0),"created_at":p.created_at.isoformat()} for p in (order.payments or [])],
+            "events":[{"id":e.id,"kind":e.type,"created_at":e.created_at.isoformat()} for e in (order.events or [])],
+            "summary": summary
+        }
 
 @app.post("/orders/{code}/payments")
 def payment(code: str, body: PaymentIn):
     now = datetime.utcnow()
     with SessionLocal() as s:
-        if not s.get(Order, code): s.add(Order(code=code, created_at=now))
-        p = Payment(order_code=code, amount=body.amount, created_at=now); s.add(p); s.commit()
+        order = s.query(Order).filter_by(order_code=code).first()
+        if not order:
+            raise HTTPException(404, detail="Order not found")
+        p = Payment(order_id=order.id, amount=body.amount, method=(body.method or "CASH"), created_at=now)
+        s.add(p); s.commit()
         return {"ok": True, "payment_id": p.id, "code": code, "amount": body.amount}
 
 @app.post("/orders/{code}/event")
 def post_event(code: str, body: EventIn):
     now = datetime.utcnow()
     with SessionLocal() as s:
-        if not s.get(Order, code): raise HTTPException(404, detail="Order not found")
-        meta = s.get(OrderMeta, code)
-        events = s.query(Event).filter(Event.order_code==code).all()
-        if any(e.kind in ("RETURN","COLLECT","INSTALMENT_CANCEL","BUYBACK") for e in events):
+        order = s.query(Order).filter_by(order_code=code).first()
+        if not order:
+            raise HTTPException(404, detail="Order not found")
+        if any((e.type in ("RETURN","COLLECT","INSTALMENT_CANCEL","BUYBACK")) for e in (order.events or [])):
             raise HTTPException(400, detail="Terminal event already recorded for this order")
 
         if body.event == "INSTALMENT_CANCEL":
             if body.penalty and body.penalty > 0:
-                s.add(Charge(order_code=code, kind="PENALTY", amount=body.penalty, note="Instalment cancel penalty", created_at=now))
+                s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.penalty, note="Instalment cancel penalty"))
             if body.delivery_return_fee and body.delivery_return_fee > 0:
-                s.add(Charge(order_code=code, kind="DELIVERY_RETURN", amount=body.delivery_return_fee, note="Return delivery (cancel)", created_at=now))
-            if meta: meta.status="CLOSED"; meta.closed_at=now
+                s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.delivery_return_fee, note="Return delivery (cancel)"))
+            order.status = "CANCELLED"
         elif body.event == "BUYBACK":
-            items = s.query(OrderItem).filter(OrderItem.order_code==code).all()
+            rate = max(0.0, min(1.0, body.buyback_rate or 0.5))
             credit = 0.0
-            for it in items:
+            for it in (order.items or []):
                 if it.unit_price:
-                    rate = (it.buyback_rate or body.buyback_rate or 0.5)
-                    credit += it.unit_price * it.qty * max(0.0, min(1.0, rate))
+                    credit += float(it.unit_price) * it.qty * rate
             if credit != 0:
-                s.add(Charge(order_code=code, kind="BUYBACK_CREDIT", amount=-abs(credit), note="Buyback credit", created_at=now))
-            if meta: meta.status="CLOSED"; meta.closed_at=now
+                s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=-abs(credit), note="Buyback credit"))
+            order.status = "RETURNED"
         elif body.event in ("RETURN","COLLECT"):
             if body.event=="RETURN" and body.delivery_return_fee and body.delivery_return_fee>0:
-                s.add(Charge(order_code=code, kind="DELIVERY_RETURN", amount=body.delivery_return_fee, note="Return delivery", created_at=now))
-            if meta: meta.status="CLOSED"; meta.closed_at=now
+                s.add(LedgerEntry(order_id=order.id, kind="ADJUSTMENT", amount=body.delivery_return_fee, note="Return delivery"))
+            order.status = "RETURNED"
 
-        s.add(Event(order_code=code, kind=body.event, created_at=now))
+        s.add(Event(order_id=order.id, type=body.event, created_at=now))
+        s.add(AuditLog(order_id=order.id, action=("EVENT_"+body.event), meta=json.dumps({"source":"api"})))
         s.commit()
         return {"ok": True, "code": code, "event": body.event}
 
 @app.post("/parse")
 def parse(body: ParseIn, idem_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
-    # Optional OpenAI client (present elsewhere in file)
-    global openai_client
-    result = parse_whatsapp(body.text, openai_client=openai_client if body.matcher == "ai" and openai_client is not None else None)
-    # keep original response shape
-    return result
+    # Keep parser tolerant; only use OpenAI if explicitly requested and available
+    try:
+        from app.parser_spacy import parse_whatsapp
+        res = parse_whatsapp(body.text, openai_client=openai_client if (body.matcher=="ai" and openai_client) else None)
+        return res
+    except Exception:
+        return {"ok": False, "detail": "Parser not available", "text": body.text}
 
-from .storage import SessionLocal, OrderMeta, OrderItem, Charge, Payment, Event, Delivery, compute_rental_accrual
-try:
-    from .storage import SessionLocal, OrderMeta, OrderItem, Charge, Payment, Event, Delivery, compute_rental_accrual
-except Exception:
-    pass
 @app.get("/calendar")
 def calendar(from_date: date | None = None, to_date: date | None = None):
     with SessionLocal() as s:
         rows = s.query(Delivery).all()
         out = []
         for d in rows:
+            code = None
+            if d.order_id:
+                o = s.query(Order).get(d.order_id)
+                code = o.order_code if o else None
             if d.outbound_date:
-                dt = d.outbound_date.date()
-                if from_date and dt < from_date:
-                    pass
-                elif to_date and dt > to_date:
-                    pass
-                else:
-                    out.append({
-                        "order_code": d.order_code,
-                        "date": dt.isoformat(),
-                        "time": d.outbound_time,
-                        "kind": "OUTBOUND",
-                        "status": d.status
-                    })
+                dt = d.outbound_date
+                if (from_date and dt < from_date) or (to_date and dt > to_date): pass
+                else: out.append({"order_code": code, "date": dt.isoformat(), "time": d.outbound_time, "kind": "OUTBOUND", "status": d.status})
             if d.return_date:
-                dt2 = d.return_date.date()
-                if from_date and dt2 < from_date:
-                    pass
-                elif to_date and dt2 > to_date:
-                    pass
-                else:
-                    out.append({
-                        "order_code": d.order_code,
-                        "date": dt2.isoformat(),
-                        "time": d.return_time,
-                        "kind": "RETURN",
-                        "status": d.status
-                    })
+                dt2 = d.return_date
+                if (from_date and dt2 < from_date) or (to_date and dt2 > to_date): pass
+                else: out.append({"order_code": code, "date": dt2.isoformat(), "time": d.return_time, "kind": "RETURN", "status": d.status})
         return {"events": out}
+
 @app.get("/reports/aging")
 def report_aging(as_of: date | None = None):
     as_of = as_of or datetime.utcnow().date()
     buckets = {"0-30":0.0,"31-60":0.0,"61-90":0.0,"90+":0.0}
     rows = []
     with SessionLocal() as s:
-        metas = s.query(OrderMeta).all()
-        for m in metas:
-            items = s.query(OrderItem).filter_by(order_code=m.order_code).all()
-            charges = s.query(Charge).filter_by(order_code=m.order_code).all()
-            pays = s.query(Payment).filter_by(order_code=m.order_code).all()
-
-            principal = sum(c.amount for c in charges if c.kind == "PRINCIPAL")
-            delivery  = sum(c.amount for c in charges if c.kind in ("DELIVERY_OUTBOUND","DELIVERY_RETURN"))
-            penalty   = sum(c.amount for c in charges if c.kind == "PENALTY")
-            credits   = sum(c.amount for c in charges if c.kind in ("BUYBACK_CREDIT","ADJUSTMENT"))
-            accrual   = 0.0
-            if m.type == "RENTAL" and m.plan_start_date:
-                start_d = m.plan_start_date.date() if hasattr(m.plan_start_date, "date") else m.plan_start_date
-                accrual = compute_rental_accrual(items, start_d, as_of)
-            paid      = sum(p.amount for p in pays)
-            total_due = principal + delivery + penalty + accrual + credits
-            outstanding = round(max(0.0, total_due - paid), 2)
-
-            if outstanding <= 0:
-                continue
-            start_for_age = m.plan_start_date.date() if (m.plan_start_date and hasattr(m.plan_start_date,"date")) else (m.plan_start_date or as_of)
+        for o in s.query(Order).all():
+            summary = compute_outstanding(o, as_of)
+            outstanding = summary["outstanding"]
+            if outstanding <= 0: continue
+            start_for_age = (o.plan.start_date if (o.plan and o.plan.start_date) else (o.created_at.date() if o.created_at else as_of))
             age_days = (as_of - start_for_age).days if start_for_age else 0
-            if   age_days <= 30: bucket = "0-30"
-            elif age_days <= 60: bucket = "31-60"
-            elif age_days <= 90: bucket = "61-90"
-            else:                bucket = "90+"
+            bucket = "0-30" if age_days<=30 else ("31-60" if age_days<=60 else ("61-90" if age_days<=90 else "90+"))
             buckets[bucket] += outstanding
-            rows.append({"code": m.order_code, "customer": m.customer_name, "type": m.type, "age_days": age_days, "outstanding": outstanding})
+            rows.append({"code": o.order_code, "customer": (o.customer.name if o.customer else None), "type": o.type, "age_days": age_days, "outstanding": outstanding})
     return {"as_of": as_of.isoformat(), "buckets": buckets, "rows": rows}
 
-
-# ---- BEGIN parse_whatsapp bridge (prefers original spaCy+OpenAI) ----
-import importlib, re
-from datetime import datetime
-
-def _load_parse_whatsapp_from_project():
-    candidates = ["app.parser","app.parsers","app.parse","app.ai_parser","app.whatsapp_parser"]
-    for mod in candidates:
-        try:
-            m = importlib.import_module(mod)
-            if hasattr(m, "parse_whatsapp"):
-                return getattr(m, "parse_whatsapp")
-        except Exception:
-            pass
-    return None
-
-_found_pw = _load_parse_whatsapp_from_project()
-if _found_pw:
-    def parse_whatsapp(text: str, openai_client=None):
-        # delegate to your original spaCy+OpenAI parser
-        return _found_pw(text, openai_client=openai_client)
-else:
-    # Deterministic fallback so /parse never 500s
-    _CODE_RE = re.compile(r"\b([A-Z]{1,3}\d{3,6})\b", re.IGNORECASE)
-    _PHONE_RE = re.compile(r"(?:\+?\d[\d\s\-]{6,}\d)")
-    _DATE_RE  = re.compile(r"\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\b")
-    _TIME_RE  = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", re.IGNORECASE)
-    def _to_iso_date(dmy, fallback_year=None):
-        if not dmy: return None
-        d, m, y = dmy
-        y = int(y) if y else (fallback_year or datetime.utcnow().year)
-        if y < 100: y += 2000 if y < 50 else 1900
-        return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
-    def parse_whatsapp(text: str, openai_client=None):
-        raw = text.replace("\r","")
-        upper = raw.upper()
-        code = (_CODE_RE.search(raw.replace(" ","")) or [None, ""])[1].upper()
-        if   "SEWA" in upper or "RENT" in upper: typ = "RENTAL"
-        elif "ANSURAN" in upper or "INSTAL" in upper: typ = "INSTALMENT"
-        elif "BELI" in upper or "OUTRIGHT" in upper or "PURCHASE" in upper: typ = "OUTRIGHT"
-        else: typ = None
-        pm = _PHONE_RE.search(raw); phone = re.sub(r"\D+","", pm.group(0)) if pm else ""
-        dm = _DATE_RE.search(raw); tm = _TIME_RE.search(raw)
-        date = _to_iso_date(dm.groups() if dm else None)
-        time = None
-        if tm:
-            hh = int(tm.group(1)); mm = int(tm.group(2) or 0); ap = (tm.group(3) or "").lower()
-            if ap=="pm" and hh<12: hh+=12
-            if ap=="am" and hh==12: hh=0
-            time = f"{hh:02d}:{mm:02d}"
-        def _num(pattern):
-            m = re.search(pattern, raw, flags=re.IGNORECASE)
-            return float(m.group(1)) if m else None
-        total = _num(r"total\s*[:=\-]?\s*rm?\s*([\d\.]+)")
-        paid  = _num(r"paid(?:\s*booking)?\s*[:=\-]?\s*rm?\s*([\d\.]+)")
-        bal   = _num(r"(?:balance|to collect)\s*[:=\-]?\s*rm?\s*([\d\.]+)")
-        parsed = {
-            "order": {
-                "code": code or None,
-                "type": typ,
-                "customer": { "name": "", "phone": phone, "address": "" },
-                "items": [],
-                "summary": { "total": total, "paid": paid, "to_collect": bal } if any(v is not None for v in (total,paid,bal)) else None,
-                "schedule": { "date": date, "time": time } if (date or time) else None
-            },
-            "event": None
-        }
-        return {"parsed": parsed, "match": None}
-# ---- END parse_whatsapp bridge ----
+@app.get("/export/xlsx")
+def export_xlsx():
+    if Workbook is None:
+        raise HTTPException(501, detail="openpyxl not installed")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Orders"
+    ws.append(["Code","Customer","Type","CreatedAt","Outstanding"])
+    with SessionLocal() as s:
+        today = datetime.utcnow().date()
+        for o in s.query(Order).all():
+            summary = compute_outstanding(o, today)
+            ws.append([
+                o.order_code,
+                (o.customer.name if o.customer else ""),
+                o.type,
+                (o.created_at.isoformat() if o.created_at else ""),
+                summary["outstanding"],
+            ])
+    buf = BytesIO()
+    wb.save(buf); buf.seek(0)
+    return Response(content=buf.read(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition":"attachment; filename=orders.xlsx"})
