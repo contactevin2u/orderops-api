@@ -20,8 +20,8 @@ def upgrade():
         sa.Column("parent_order_id", sa.Integer, sa.ForeignKey("orders.id", ondelete="SET NULL")),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("order_type", sa.String(length=20), nullable=False),  # OUTRIGHT/RENTAL/INSTALMENT
-        sa.Column("event_type", sa.String(length=20), nullable=False),  # DELIVERY/RETURN
+        sa.Column("order_type", sa.String(length=20), nullable=False),
+        sa.Column("event_type", sa.String(length=20), nullable=False),
         sa.Column("status", sa.String(length=20), server_default="ACTIVE", nullable=False),
         sa.Column("customer_name", sa.String(length=255)),
         sa.Column("phone", sa.String(length=50)),
@@ -51,7 +51,7 @@ def upgrade():
         "order_items",
         sa.Column("id", sa.Integer, primary_key=True),
         sa.Column("order_id", sa.Integer, sa.ForeignKey("orders.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("item_type", sa.String(length=20), nullable=False),   # RENTAL/INSTALMENT/OUTRIGHT/DELIVERY/RETURN_FEE etc
+        sa.Column("item_type", sa.String(length=20), nullable=False),
         sa.Column("text", sa.Text()),
         sa.Column("name", sa.String(length=255), nullable=False),
         sa.Column("sku", sa.String(length=64)),
@@ -67,7 +67,7 @@ def upgrade():
         sa.Column("id", sa.Integer, primary_key=True),
         sa.Column("order_id", sa.Integer, sa.ForeignKey("orders.id", ondelete="CASCADE"), nullable=False),
         sa.Column("amount", sa.Numeric(12,2), nullable=False),
-        sa.Column("method", sa.String(length=50)),        # CASH, FPX, CHEQUE, TNG, etc.
+        sa.Column("method", sa.String(length=50)),
         sa.Column("reference", sa.String(length=100)),
         sa.Column("status", sa.String(length=20), server_default="POSTED", nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
@@ -78,7 +78,7 @@ def upgrade():
     op.create_table(
         "messages",
         sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("source", sa.String(length=50)),        # e.g. 'whatsapp'
+        sa.Column("source", sa.String(length=50)),
         sa.Column("raw_text", sa.Text(), nullable=False),
         sa.Column("sha256", sa.String(length=64), unique=True),
         sa.Column("parsed_json", sa.Text()),

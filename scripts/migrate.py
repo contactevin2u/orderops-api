@@ -1,27 +1,34 @@
-import os, sys
+import os
 from alembic.config import Config
 from alembic import command
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, text, inspect
+from sqlalchemy import create_engine, inspect, text
 
-def needs_stamp_base(url: str, cfg: Config) -> bool:
+def get_db_url():
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        raise SystemExit("DATABASE_URL is not set")
+    return url
+
+def clear_unknown_revision(url: str, cfg: Config):
     eng = create_engine(url, future=True)
     insp = inspect(eng)
     if not insp.has_table("alembic_version"):
-        return True
-    with eng.connect() as conn:
+        return  # fresh DB
+    with eng.begin() as conn:
         row = conn.execute(text("SELECT version_num FROM alembic_version")).fetchone()
         current = row[0] if row else None
-    if not current:
-        return True
-    script = ScriptDirectory.from_config(cfg)
-    try:
-        script.get_revision(current)
-        return False
-    except Exception:
-        return True
+        if not current:
+            return
+        # If current isn't in our script directory, delete the row(s) so upgrade can proceed from base
+        script = ScriptDirectory.from_config(cfg)
+        try:
+            script.get_revision(current)
+        except Exception:
+            conn.execute(text("DELETE FROM alembic_version"))
+            print(f"Removed unknown alembic version '{current}'")
 
-def reset_db_if_requested(url: str):
+def optional_reset(url: str):
     if os.getenv("RESET_DB") != "1":
         return
     eng = create_engine(url, future=True)
@@ -30,24 +37,20 @@ def reset_db_if_requested(url: str):
             conn.exec_driver_sql("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;")
             print("Schema public dropped & recreated.")
         elif conn.dialect.name == "sqlite" and url.startswith("sqlite:///"):
+            import os as _os
             path = url.replace("sqlite:///", "", 1)
             try:
-                os.remove(path)
-                print(f"Removed {path}")
+                _os.remove(path); print(f"Removed {path}")
             except FileNotFoundError:
                 pass
-        else:
-            print(f"RESET_DB not implemented for {conn.dialect.name}", file=sys.stderr)
 
 def main():
+    url = get_db_url()
     cfg = Config("alembic.ini")
-    url = os.environ["DATABASE_URL"]
-    reset_db_if_requested(url)
-    if needs_stamp_base(url, cfg):
-        command.stamp(cfg, "base")
-        print("Stamped base (version table was missing/unknown).")
+    optional_reset(url)
+    clear_unknown_revision(url, cfg)
     command.upgrade(cfg, "head")
-    print("Upgraded to head.")
+    print("Alembic upgrade head complete.")
 
 if __name__ == "__main__":
     main()

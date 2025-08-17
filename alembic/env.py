@@ -8,13 +8,13 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Prefer DATABASE_URL from environment if present
+# Prefer DATABASE_URL from environment
 section = config.get_section(config.config_ini_section) or {}
 env_url = os.getenv("DATABASE_URL")
 if env_url:
     section["sqlalchemy.url"] = env_url
 
-target_metadata = None
+target_metadata = None  # reflect-free; we use migrations
 
 def run_migrations_offline() -> None:
     url = section.get("sqlalchemy.url") or config.get_main_option("sqlalchemy.url")

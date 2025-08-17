@@ -7,6 +7,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# cache-bust switch (edit date to force rebuild if needed)
 ARG CACHE_BUST=2025-08-18
 
 COPY app ./app
