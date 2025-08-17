@@ -2,11 +2,12 @@
 
 Revision ID: 4f3e44d8ade6
 Revises: 69026ee222d9
-Create Date: 2025-08-17 12:57:53
+Create Date: 2025-08-17 13:04:50
 """
 from alembic import op
 import sqlalchemy as sa  # noqa
 
+# revision identifiers, used by Alembic.
 revision = "4f3e44d8ade6"
 down_revision = ('69026ee222d9')
 branch_labels = None
@@ -18,10 +19,7 @@ def upgrade():
     op.execute("""
       DO $$
       BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_indexes
-          WHERE indexname = 'ix_deliveries_order_id'
-        ) THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'ix_deliveries_order_id') THEN
           CREATE INDEX ix_deliveries_order_id ON deliveries (order_id);
         END IF;
       END $$;
@@ -29,9 +27,7 @@ def upgrade():
     op.execute("""
       DO $$
       BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint WHERE conname = 'fk_deliveries_order_id_orders'
-        ) THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_deliveries_order_id_orders') THEN
           ALTER TABLE deliveries
             ADD CONSTRAINT fk_deliveries_order_id_orders
             FOREIGN KEY (order_id) REFERENCES orders(id);
@@ -72,10 +68,7 @@ def upgrade():
     op.execute("""
       DO $$
       BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_indexes
-          WHERE indexname = 'ix_audit_logs_order_id'
-        ) THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'ix_audit_logs_order_id') THEN
           CREATE INDEX ix_audit_logs_order_id ON audit_logs (order_id);
         END IF;
       END $$;
@@ -83,9 +76,7 @@ def upgrade():
     op.execute("""
       DO $$
       BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint WHERE conname = 'fk_audit_logs_order_id_orders'
-        ) THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_audit_logs_order_id_orders') THEN
           ALTER TABLE audit_logs
             ADD CONSTRAINT fk_audit_logs_order_id_orders
             FOREIGN KEY (order_id) REFERENCES orders(id);
@@ -112,21 +103,17 @@ def upgrade():
     """)
 
 def downgrade():
-    -- No-op safe downgrade; drop guardedly
+    # No-op safe downgrade; drop guardedly
     op.execute("""
       DO $$
       BEGIN
         IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_audit_logs_order_id_orders') THEN
           ALTER TABLE audit_logs DROP CONSTRAINT fk_audit_logs_order_id_orders;
         END IF;
-        IF EXISTS (
-          SELECT 1 FROM pg_indexes WHERE indexname = 'ix_audit_logs_order_id'
-        ) THEN
+        IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'ix_audit_logs_order_id') THEN
           DROP INDEX ix_audit_logs_order_id;
         END IF;
-        IF EXISTS (
-          SELECT 1 FROM information_schema.columns WHERE table_name='audit_logs' AND column_name='order_id'
-        ) THEN
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='audit_logs' AND column_name='order_id') THEN
           ALTER TABLE audit_logs DROP COLUMN order_id;
         END IF;
       END $$;
@@ -137,14 +124,10 @@ def downgrade():
         IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_deliveries_order_id_orders') THEN
           ALTER TABLE deliveries DROP CONSTRAINT fk_deliveries_order_id_orders;
         END IF;
-        IF EXISTS (
-          SELECT 1 FROM pg_indexes WHERE indexname = 'ix_deliveries_order_id'
-        ) THEN
+        IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'ix_deliveries_order_id') THEN
           DROP INDEX ix_deliveries_order_id;
         END IF;
-        IF EXISTS (
-          SELECT 1 FROM information_schema.columns WHERE table_name='deliveries' AND column_name='order_id'
-        ) THEN
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='deliveries' AND column_name='order_id') THEN
           ALTER TABLE deliveries DROP COLUMN order_id;
         END IF;
       END $$;
