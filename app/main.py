@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI, Depends, HTTPException, Body, Response
+from fastapi import FastAPI, Depends, HTTPException, Body, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
@@ -30,7 +30,6 @@ app.add_middleware(
 )
 
 # DB init (dev convenience)
-Base.metadata.create_all(bind=engine)
 
 def now_utc():
     return datetime.now(timezone.utc)

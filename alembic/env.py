@@ -4,20 +4,16 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-# Alembic Config
 config = context.config
-
-# logging config (optional)
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# prefer DATABASE_URL from env
+# Prefer DATABASE_URL from environment if present
 section = config.get_section(config.config_ini_section) or {}
 env_url = os.getenv("DATABASE_URL")
 if env_url:
     section["sqlalchemy.url"] = env_url
 
-# explicit migrations only (no autogenerate metadata wired here)
 target_metadata = None
 
 def run_migrations_offline() -> None:

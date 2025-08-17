@@ -1,16 +1,17 @@
 services:
   - type: web
-    name: order-intake-backend
+    name: orderops-api
     env: docker
-    plan: starter
-    autoDeploy: true
-    region: singapore
+    healthCheckPath: /health
+    preDeployCommand: "python scripts/migrate.py"
     envVars:
-      - key: OPENAI_API_KEY
-        sync: false
       - key: DATABASE_URL
         sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_BASE_URL
+        sync: false
       - key: CORS_ORIGINS
-        value: "*"
-      - key: OPENAI_MODEL
-        value: "gpt-4o-mini"
+        value: "https://orderops-admin.vercel.app"
+      - key: API_KEY
+        sync: false

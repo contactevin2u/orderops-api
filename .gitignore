@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
@@ -6,10 +6,10 @@ __pycache__/
 .venv/
 .env
 .env.*
-order.db
+local.db
 *.sqlite3
 
-# Editor/OS
+# OS/Editor
 .vscode/
 .DS_Store
 Thumbs.db
