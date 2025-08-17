@@ -123,3 +123,4 @@ def parse_message(text: str) -> Dict[str, Any]:
         # Return a best-effort minimal object
         return {"event_type": "DELIVERY", "items": [], "notes": f"parse_error: {e}"}
 
+
