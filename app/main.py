@@ -396,3 +396,24 @@ def export_cash(start: str, end: str, db: Session = Depends(get_db)):
 
 
 
+# --- ensure DB schema minimal compatibility (no-op if already migrated)
+@app.on_event("startup")
+def bootstrap_schema():
+    try:
+        # local imports to avoid hard module deps at import time
+        from sqlalchemy import inspect, text
+        from .db import engine
+        with engine.begin() as conn:
+            insp = inspect(conn)
+            try:
+                cols = {c["name"] for c in insp.get_columns("orders")}
+            except Exception:
+                cols = set()
+            # add orders.code if missing
+            if "code" not in cols:
+                conn.execute(text('ALTER TABLE orders ADD COLUMN code VARCHAR(50)'))
+                # non-unique index is fine; unique can be added later when data is clean
+                conn.execute(text('CREATE INDEX IF NOT EXISTS ix_orders_code ON orders(code)'))
+    except Exception as e:
+        # don’t crash app if DB lacks perms; just log
+        print(f"bootstrap_schema warn: {e}")
