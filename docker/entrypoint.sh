@@ -1,14 +1,16 @@
 #!/usr/bin/env sh
-set -eu
+set -e
 
 echo "[entrypoint] DATABASE_URL=${DATABASE_URL:+present}"
 
-# Show current Alembic state for debugging
-alembic heads || true
-alembic history -n -20 || true
+if [ -f ./alembic.ini ]; then
+  echo "[entrypoint] Running Alembic migrations..."
+  # Show current heads and recent history (no -n on 'heads')
+  alembic heads || true
+  alembic history -n -20 || true
+  # Try single-head upgrade; if multiple heads, upgrade all
+  alembic upgrade head || alembic upgrade heads
+fi
 
-# Run migrations
-alembic upgrade head
-
-# Start API
-exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-10000}"
+# Hand off to the image CMD/args
+exec "$@"
