@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: order-intake-backend
+    env: docker
+    plan: starter
+    autoDeploy: true
+    region: singapore
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: OPENAI_MODEL
+        value: "gpt-4o-mini"
