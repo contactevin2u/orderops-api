@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Response, HTTPException, Query, Header
+﻿from fastapi import FastAPI, Response, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.staticfiles import StaticFiles
 from fastapi.staticfiles import StaticFiles
@@ -380,3 +380,73 @@ def report_aging(as_of: date | None = None):
             buckets[bucket] += outstanding
             rows.append({"code": m.order_code, "customer": m.customer_name, "type": m.type, "age_days": age_days, "outstanding": outstanding})
     return {"as_of": as_of.isoformat(), "buckets": buckets, "rows": rows}
+
+
+# ---- BEGIN parse_whatsapp bridge (prefers original spaCy+OpenAI) ----
+import importlib, re
+from datetime import datetime
+
+def _load_parse_whatsapp_from_project():
+    candidates = ["app.parser","app.parsers","app.parse","app.ai_parser","app.whatsapp_parser"]
+    for mod in candidates:
+        try:
+            m = importlib.import_module(mod)
+            if hasattr(m, "parse_whatsapp"):
+                return getattr(m, "parse_whatsapp")
+        except Exception:
+            pass
+    return None
+
+_found_pw = _load_parse_whatsapp_from_project()
+if _found_pw:
+    def parse_whatsapp(text: str, openai_client=None):
+        # delegate to your original spaCy+OpenAI parser
+        return _found_pw(text, openai_client=openai_client)
+else:
+    # Deterministic fallback so /parse never 500s
+    _CODE_RE = re.compile(r"\b([A-Z]{1,3}\d{3,6})\b", re.IGNORECASE)
+    _PHONE_RE = re.compile(r"(?:\+?\d[\d\s\-]{6,}\d)")
+    _DATE_RE  = re.compile(r"\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\b")
+    _TIME_RE  = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", re.IGNORECASE)
+    def _to_iso_date(dmy, fallback_year=None):
+        if not dmy: return None
+        d, m, y = dmy
+        y = int(y) if y else (fallback_year or datetime.utcnow().year)
+        if y < 100: y += 2000 if y < 50 else 1900
+        return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+    def parse_whatsapp(text: str, openai_client=None):
+        raw = text.replace("\r","")
+        upper = raw.upper()
+        code = (_CODE_RE.search(raw.replace(" ","")) or [None, ""])[1].upper()
+        if   "SEWA" in upper or "RENT" in upper: typ = "RENTAL"
+        elif "ANSURAN" in upper or "INSTAL" in upper: typ = "INSTALMENT"
+        elif "BELI" in upper or "OUTRIGHT" in upper or "PURCHASE" in upper: typ = "OUTRIGHT"
+        else: typ = None
+        pm = _PHONE_RE.search(raw); phone = re.sub(r"\D+","", pm.group(0)) if pm else ""
+        dm = _DATE_RE.search(raw); tm = _TIME_RE.search(raw)
+        date = _to_iso_date(dm.groups() if dm else None)
+        time = None
+        if tm:
+            hh = int(tm.group(1)); mm = int(tm.group(2) or 0); ap = (tm.group(3) or "").lower()
+            if ap=="pm" and hh<12: hh+=12
+            if ap=="am" and hh==12: hh=0
+            time = f"{hh:02d}:{mm:02d}"
+        def _num(pattern):
+            m = re.search(pattern, raw, flags=re.IGNORECASE)
+            return float(m.group(1)) if m else None
+        total = _num(r"total\s*[:=\-]?\s*rm?\s*([\d\.]+)")
+        paid  = _num(r"paid(?:\s*booking)?\s*[:=\-]?\s*rm?\s*([\d\.]+)")
+        bal   = _num(r"(?:balance|to collect)\s*[:=\-]?\s*rm?\s*([\d\.]+)")
+        parsed = {
+            "order": {
+                "code": code or None,
+                "type": typ,
+                "customer": { "name": "", "phone": phone, "address": "" },
+                "items": [],
+                "summary": { "total": total, "paid": paid, "to_collect": bal } if any(v is not None for v in (total,paid,bal)) else None,
+                "schedule": { "date": date, "time": time } if (date or time) else None
+            },
+            "event": None
+        }
+        return {"parsed": parsed, "match": None}
+# ---- END parse_whatsapp bridge ----
