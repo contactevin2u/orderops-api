@@ -1,5 +1,6 @@
-﻿from fastapi import FastAPI, Response, HTTPException, Query, Header
+from fastapi import FastAPI, Response, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.staticfiles import StaticFiles
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal, List, Dict, Any
@@ -297,140 +298,9 @@ def post_event(code: str, body: EventIn):
         return {"ok": True, "code": code, "event": body.event}
 
 @app.post("/parse")
-def parse(body: ParseIn):
-    text = body.text or ""
-    intent = None
-    hints = spacy_extract_hints(text, body.lang)
-    intent = hints.get("intent")
-
-    # Try AI (strict JSON schema). Fallback to spaCy-only if AI fails or not configured.
-    data = None
-    if "openai_client" in globals() and openai_client is not None:
-        SCHEMA = {
-            "name": "order_parse",
-            "schema": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "order_code": {"type": ["string","null"]},
-                    "customer_name": {"type": ["string","null"]},
-                    "phone": {"type": ["string","null"]},
-                    "address": {"type": ["string","null"]},
-                    "items": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "name": {"type":"string"},
-                                "sku": {"type":["string","null"]},
-                                "qty": {"type":"integer","minimum":1, "default":1},
-                                "unit_price": {"type":["number","null"]},
-                                "rent_monthly": {"type":["number","null"]},
-                                "buyback_rate": {"type":["number","null"]}
-                            },
-                            "required": ["name"]
-                        }
-                    },
-                    "delivery": {
-                        "type":"object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "outbound_fee": {"type":["number","null"]},
-                            "return_fee": {"type":["number","null"]}
-                        },
-                        "required": ["outbound_fee","return_fee"]
-                    },
-                    "totals": {
-                        "type":"object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "total": {"type":["number","null"]},
-                            "paid": {"type":["number","null"]},
-                            "balance": {"type":["number","null"]}
-                        },
-                        "required": ["total","paid","balance"]
-                    },
-                    "schedule": {
-                        "type":"object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "date": {"type":["string","null"]},
-                            "time": {"type":["string","null"]}
-                        },
-                        "required": ["date","time"]
-                    },
-                    "plan": {
-                        "type":"object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "months": {"type":["integer","null"]},
-                            "start_date": {"type":["string","null"]}
-                        },
-                        "required": ["months","start_date"]
-                    },
-                    "intent": {"type":["string","null"], "enum": ["RETURN","COLLECT","INSTALMENT_CANCEL","BUYBACK", None]},
-                    "type_hint": {"type":["string","null"], "enum": ["RENTAL","OUTRIGHT", None]}
-                },
-                "required": ["customer_name","phone","items","totals","intent"]
-            }
-        }
-
-        try:
-            # Build concise hint line for the model
-            hint_line = {
-                "order_code": hints.get("order_code"),
-                "customer_name": hints.get("customer_name"),
-                "phone": hints.get("phone"),
-                "item_names": [i["name"] for i in (hints.get("items") or [])],
-                "type_hint": hints.get("type_hint"),
-                "intent": hints.get("intent"),
-                "delivery": hints.get("delivery"),
-                "totals": hints.get("totals"),
-                "schedule": hints.get("schedule")
-            }
-
-            prompt = f"""Extract order fields as strict JSON.
-If a field is unknown, use null. Respect units: 'RM' is currency MYR.
-Use these hints if they don't conflict with the text:
-Hints: {hint_line}
-
-Text:
-{text}
-"""
-
-            resp = openai_client.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),
-                messages=[
-                    {"role":"system","content":"You are a structured information extractor. Output ONLY a JSON that matches the provided schema."},
-                    {"role":"user","content":prompt}
-                ],
-                response_format={"type":"json_schema","json_schema":SCHEMA},
-                temperature=0.1
-            )
-            data = json.loads(resp.choices[0].message.content)
-        except Exception:
-            data = None
-
-    if not data:
-        # Graceful fallback with spaCy-only hints
-        data = {
-            "order_code": hints.get("order_code"),
-            "customer_name": hints.get("customer_name"),
-            "phone": hints.get("phone"),
-            "address": None,
-            "items": hints.get("items") or [],
-            "delivery": hints.get("delivery"),
-            "totals": hints.get("totals"),
-            "schedule": hints.get("schedule"),
-            "plan": {"months": None, "start_date": None},
-            "intent": intent,
-            "type_hint": hints.get("type_hint"),
-        }
-
-    code = data.get("order_code") or hints.get("order_code")
-    return {
-        "parsed": {"ai": data, "matcher": "ai", "lang": body.lang},
-        "match": {"order_code": code, "reason": "ai+spacy"} if code else None,
-        "intent": data.get("intent") or intent
-    }
+def parse(body: ParseIn, idem_key: Optional[str] = Header(default=None, alias="Idempotency-Key")):
+    # Optional OpenAI client (present elsewhere in file)
+    global openai_client
+    result = parse_whatsapp(body.text, openai_client=openai_client if body.matcher == "ai" and openai_client is not None else None)
+    # keep original response shape
+    return result
